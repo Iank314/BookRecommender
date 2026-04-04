@@ -41,9 +41,9 @@ class RecommendationEngine:
     # ------------------------------------------------------------------
     # Free‑text / feature‑vector recommendation
     # ------------------------------------------------------------------
-    def recommend_for_vector(self, query_vec: np.ndarray, top_n: int = 5) -> list[str]:
+    def recommend_for_vector(self, query_vec: np.ndarray, top_n: int = 5) -> list[tuple[str, float]]:
         if self.feature_matrix is None or self.ids is None:
             raise RuntimeError("Engine has not been fitted yet.")
         sims = cosine_similarity([query_vec], self.feature_matrix)[0]
         best_idxs = np.argsort(sims)[::-1][:top_n]
-        return [self.ids[i] for i in best_idxs]
+        return [(self.ids[i], float(sims[i])) for i in best_idxs]

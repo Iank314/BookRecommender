@@ -1,65 +1,91 @@
-const API = "";  // same origin
+const API = "";
 
-const form      = document.getElementById("search-form");
-const input     = document.getElementById("search-input");
-const btn       = document.getElementById("search-btn");
-const loading   = document.getElementById("loading");
-const errorBox  = document.getElementById("error");
-const results   = document.getElementById("results");
-const heading   = document.getElementById("results-heading");
-const container = document.getElementById("results-container");
+const form       = document.getElementById("search-form");
+const input      = document.getElementById("search-input");
+const btn        = document.getElementById("search-btn");
+const loading    = document.getElementById("loading");
+const errorBox   = document.getElementById("error");
+const results    = document.getElementById("results");
+const heading    = document.getElementById("results-heading");
+const container  = document.getElementById("results-container");
+const tabs       = document.querySelectorAll(".tab");
+const pagination = document.getElementById("pagination");
+const searchBar  = document.querySelector(".search-bar");
 
+let activeCategory = "title";
+let lastQuery = "";
+let currentPage = 1;
+let totalPages = 0;
+let viewMode = "search"; // "search" | "library"
+
+const placeholders = {
+  title:  "Search by title... e.g. Harry Potter",
+  author: "Search by author... e.g. J.K. Rowling",
+  genre:  "Search by genre... e.g. comedy, sci-fi, romance",
+};
+
+// Tab switching
+tabs.forEach((tab) => {
+  tab.addEventListener("click", () => {
+    tabs.forEach((t) => t.classList.remove("active"));
+    tab.classList.add("active");
+    activeCategory = tab.dataset.category;
+
+    if (activeCategory === "library") {
+      searchBar.classList.add("hidden");
+      viewMode = "library";
+      loadLibrary();
+    } else {
+      searchBar.classList.remove("hidden");
+      input.placeholder = placeholders[activeCategory];
+      viewMode = "search";
+      input.focus();
+    }
+  });
+});
+
+// Search form
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
   const query = input.value.trim();
   if (!query) return;
+  lastQuery = query;
+  currentPage = 1;
+  await doSearch(query, activeCategory, 1);
+});
 
-  // UI state: loading
+// ---- Search ----
+
+async function doSearch(query, category, page) {
   btn.disabled = true;
-  loading.classList.remove("hidden");
-  results.classList.add("hidden");
-  errorBox.classList.add("hidden");
+  showLoading("Searching and ranking books...");
 
   try {
-    // 1. Build the index from Open Library using the search query
-    const buildRes = await fetch(`${API}/build`, {
+    const res = await fetch(`${API}/search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        query: query,
-        max_results: 20,
-        source: "https://openlibrary.org/search.json",
+        query, category, top_n: 100, page, page_size: 20,
       }),
     });
+    if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || `Search failed`);
 
-    if (!buildRes.ok) {
-      const err = await buildRes.json().catch(() => null);
-      throw new Error(err?.detail || `Build failed (${buildRes.status})`);
-    }
-
-    // 2. Get recommendations based on the same query text
-    const recRes = await fetch(
-      `${API}/recommend?q=${encodeURIComponent(query)}&top_n=20`
-    );
-
-    if (!recRes.ok) {
-      const err = await recRes.json().catch(() => null);
-      throw new Error(err?.detail || `Recommend failed (${recRes.status})`);
-    }
-
-    const books = await recRes.json();
-    renderResults(books, query);
+    const data = await res.json();
+    currentPage = data.page;
+    totalPages = data.total_pages;
+    renderResults(data.books, query, category, data.total, page);
+    renderPagination(data.page, data.total_pages);
   } catch (err) {
-    errorBox.textContent = err.message;
-    errorBox.classList.remove("hidden");
+    showError(err.message);
   } finally {
     btn.disabled = false;
-    loading.classList.add("hidden");
+    hideLoading();
   }
-});
+}
 
-function renderResults(books, query) {
+function renderResults(books, query, category, total, page) {
   container.innerHTML = "";
+  pagination.classList.add("hidden");
 
   if (books.length === 0) {
     heading.textContent = "No results found.";
@@ -67,37 +93,223 @@ function renderResults(books, query) {
     return;
   }
 
-  heading.textContent = `Top ${books.length} results for "${query}"`;
+  const label = { title: "title", author: "author", genre: "genre" }[category] || "search";
+  const startRank = (page - 1) * 20;
+  heading.textContent = `${total} results for ${label}: "${query}"`;
 
-  // Group books by their primary tag (genre)
+  renderBookList(books, startRank);
+  results.classList.remove("hidden");
+}
+
+// ---- Library ----
+
+async function loadLibrary() {
+  showLoading("Loading your library...");
+  try {
+    const res = await fetch(`${API}/library`);
+    if (!res.ok) throw new Error("Failed to load library");
+    const books = await res.json();
+    renderLibrary(books);
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    hideLoading();
+  }
+}
+
+function renderLibrary(books) {
+  container.innerHTML = "";
+  pagination.classList.add("hidden");
+
+  if (books.length === 0) {
+    heading.textContent = "Your library is empty";
+    const hint = document.createElement("p");
+    hint.className = "library-hint";
+    hint.textContent = 'Search for books and click "Save to Library" to build your collection.';
+    container.appendChild(hint);
+    results.classList.remove("hidden");
+    return;
+  }
+
+  heading.textContent = `My Library (${books.length} books)`;
+
+  // Recommend button
+  const recBtn = document.createElement("button");
+  recBtn.className = "recommend-btn";
+  recBtn.textContent = "Get Recommendations Based on My Library";
+  recBtn.addEventListener("click", getLibraryRecommendations);
+  container.appendChild(recBtn);
+
+  renderBookList(books, 0, { showRemove: true });
+  results.classList.remove("hidden");
+}
+
+async function saveToLibrary(book) {
+  try {
+    const res = await fetch(`${API}/library/add`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: book.id, title: book.title, authors: book.authors,
+        description: book.description || "", tags: book.tags, metadata: book.metadata || {},
+      }),
+    });
+    if (!res.ok) throw new Error("Failed to save");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function removeFromLibrary(bookId) {
+  try {
+    const res = await fetch(`${API}/library/${encodeURIComponent(bookId)}`, { method: "DELETE" });
+    if (!res.ok) throw new Error("Failed to remove");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function getLibraryRecommendations() {
+  showLoading("Analyzing your library and finding recommendations...");
+  try {
+    const res = await fetch(`${API}/library/recommend?top_n=20`, { method: "POST" });
+    if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || "Recommendation failed");
+    const books = await res.json();
+    renderLibraryRecommendations(books);
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    hideLoading();
+  }
+}
+
+function renderLibraryRecommendations(books) {
+  container.innerHTML = "";
+  pagination.classList.add("hidden");
+
+  // Back button
+  const backBtn = document.createElement("button");
+  backBtn.className = "back-btn";
+  backBtn.textContent = "\u2190 Back to My Library";
+  backBtn.addEventListener("click", loadLibrary);
+  container.appendChild(backBtn);
+
+  if (books.length === 0) {
+    heading.textContent = "No recommendations found. Try saving more books with varied genres.";
+    results.classList.remove("hidden");
+    return;
+  }
+
+  heading.textContent = `Recommended for you (${books.length} books)`;
+  renderBookList(books, 0);
+  results.classList.remove("hidden");
+}
+
+// ---- Find Similar ----
+
+async function findSimilar(book) {
+  showLoading("Finding similar books...");
+  try {
+    const res = await fetch(`${API}/similar`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: book.title, authors: book.authors,
+        description: book.description || "", tags: book.tags, top_n: 20,
+      }),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || "Similar search failed");
+    const books = await res.json();
+    renderSimilarResults(books, book.title);
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    hideLoading();
+  }
+}
+
+function renderSimilarResults(books, sourceTitle) {
+  container.innerHTML = "";
+  pagination.classList.add("hidden");
+
+  const backBtn = document.createElement("button");
+  backBtn.className = "back-btn";
+  backBtn.textContent = "\u2190 Back to search results";
+  backBtn.addEventListener("click", () => {
+    if (lastQuery) doSearch(lastQuery, activeCategory, currentPage);
+    else results.classList.add("hidden");
+  });
+  container.appendChild(backBtn);
+
+  if (books.length === 0) {
+    heading.textContent = `No similar books found for "${sourceTitle}"`;
+    results.classList.remove("hidden");
+    return;
+  }
+
+  heading.textContent = `Books similar to "${sourceTitle}"`;
+  renderBookList(books, 0);
+  results.classList.remove("hidden");
+}
+
+// ---- Shared rendering ----
+
+function renderBookList(books, startRank, options = {}) {
   const grouped = {};
   books.forEach((book, i) => {
     const genre = book.tags.length > 0 ? book.tags[0] : "Uncategorized";
     if (!grouped[genre]) grouped[genre] = [];
-    grouped[genre].push({ ...book, rank: i + 1 });
+    grouped[genre].push({ ...book, rank: startRank + i + 1 });
   });
 
-  // Render each genre section
   for (const [genre, genreBooks] of Object.entries(grouped)) {
     const section = document.createElement("div");
     section.className = "genre-section";
 
-    const label = document.createElement("div");
-    label.className = "genre-label";
-    label.textContent = genre;
-    section.appendChild(label);
+    const genreLabel = document.createElement("div");
+    genreLabel.className = "genre-label";
+    genreLabel.textContent = genre;
+    section.appendChild(genreLabel);
 
     for (const book of genreBooks) {
-      section.appendChild(createCard(book));
+      section.appendChild(createCard(book, options));
     }
-
     container.appendChild(section);
   }
-
-  results.classList.remove("hidden");
 }
 
-function createCard(book) {
+function renderPagination(page, pages) {
+  pagination.innerHTML = "";
+  if (pages <= 1) { pagination.classList.add("hidden"); return; }
+
+  const prev = document.createElement("button");
+  prev.className = "page-btn";
+  prev.textContent = "Prev";
+  prev.disabled = page <= 1;
+  prev.addEventListener("click", () => doSearch(lastQuery, activeCategory, page - 1));
+  pagination.appendChild(prev);
+
+  for (let i = 1; i <= pages; i++) {
+    const b = document.createElement("button");
+    b.className = "page-btn" + (i === page ? " active" : "");
+    b.textContent = i;
+    b.addEventListener("click", () => doSearch(lastQuery, activeCategory, i));
+    pagination.appendChild(b);
+  }
+
+  const next = document.createElement("button");
+  next.className = "page-btn";
+  next.textContent = "Next";
+  next.disabled = page >= pages;
+  next.addEventListener("click", () => doSearch(lastQuery, activeCategory, page + 1));
+  pagination.appendChild(next);
+
+  pagination.classList.remove("hidden");
+}
+
+function createCard(book, options = {}) {
   const card = document.createElement("div");
   card.className = "book-card";
 
@@ -108,15 +320,16 @@ function createCard(book) {
   const info = document.createElement("div");
   info.className = "book-info";
 
+  const header = document.createElement("div");
+  header.className = "book-header";
+
   const title = document.createElement("div");
   title.className = "book-title";
   title.textContent = book.title;
 
   const authors = document.createElement("div");
   authors.className = "book-authors";
-  authors.textContent = book.authors.length > 0
-    ? book.authors.join(", ")
-    : "Unknown author";
+  authors.textContent = book.authors.length > 0 ? book.authors.join(", ") : "Unknown author";
 
   const tags = document.createElement("div");
   tags.className = "book-tags";
@@ -127,14 +340,123 @@ function createCard(book) {
     tags.appendChild(tag);
   }
 
-  info.appendChild(title);
-  info.appendChild(authors);
-  info.appendChild(tags);
+  header.appendChild(title);
+  header.appendChild(authors);
+  header.appendChild(tags);
+  info.appendChild(header);
+
+  // Expandable details
+  const details = document.createElement("div");
+  details.className = "book-details hidden";
+
+  if (book.description) {
+    const desc = document.createElement("p");
+    desc.className = "book-description";
+    desc.textContent = book.description;
+    details.appendChild(desc);
+  }
+
+  // Links
+  const links = document.createElement("div");
+  links.className = "book-links";
+
+  const meta = book.metadata || {};
+  if (meta.infoLink) {
+    const gbLink = document.createElement("a");
+    gbLink.href = meta.infoLink;
+    gbLink.target = "_blank";
+    gbLink.rel = "noopener";
+    gbLink.className = "book-link";
+    gbLink.textContent = "Google Books";
+    links.appendChild(gbLink);
+  }
+  if (book.id && book.id.startsWith("ol_")) {
+    const olLink = document.createElement("a");
+    olLink.href = `https://openlibrary.org${book.id.replace("ol_", "")}`;
+    olLink.target = "_blank";
+    olLink.rel = "noopener";
+    olLink.className = "book-link";
+    olLink.textContent = "Open Library";
+    links.appendChild(olLink);
+  }
+  const searchQuery = encodeURIComponent(`${book.title} ${book.authors.join(" ")} read online`);
+  const googleLink = document.createElement("a");
+  googleLink.href = `https://www.google.com/search?q=${searchQuery}`;
+  googleLink.target = "_blank";
+  googleLink.rel = "noopener";
+  googleLink.className = "book-link";
+  googleLink.textContent = "Find Online";
+  links.appendChild(googleLink);
+
+  details.appendChild(links);
+
+  // Action buttons row
+  const actions = document.createElement("div");
+  actions.className = "book-actions";
+
+  // Save to Library button
+  if (!options.showRemove) {
+    const saveBtn = document.createElement("button");
+    saveBtn.className = "save-btn";
+    saveBtn.textContent = "Save to Library";
+    saveBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const ok = await saveToLibrary(book);
+      if (ok) {
+        saveBtn.textContent = "Saved!";
+        saveBtn.disabled = true;
+        saveBtn.classList.add("saved");
+      }
+    });
+    actions.appendChild(saveBtn);
+  }
+
+  // Remove from Library button
+  if (options.showRemove) {
+    const removeBtn = document.createElement("button");
+    removeBtn.className = "remove-btn";
+    removeBtn.textContent = "Remove from Library";
+    removeBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const ok = await removeFromLibrary(book.id);
+      if (ok) {
+        card.style.opacity = "0.3";
+        removeBtn.textContent = "Removed";
+        removeBtn.disabled = true;
+      }
+    });
+    actions.appendChild(removeBtn);
+  }
+
+  // Find Similar button
+  const similarBtn = document.createElement("button");
+  similarBtn.className = "similar-btn";
+  similarBtn.textContent = "Find Similar";
+  similarBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    findSimilar(book);
+  });
+  actions.appendChild(similarBtn);
+
+  details.appendChild(actions);
+  info.appendChild(details);
+
+  // Toggle
+  const toggle = document.createElement("div");
+  toggle.className = "book-expand";
+  toggle.textContent = "\u25BC";
+  card.addEventListener("click", (e) => {
+    if (e.target.closest("a, button")) return;
+    const open = !details.classList.contains("hidden");
+    details.classList.toggle("hidden");
+    toggle.textContent = open ? "\u25BC" : "\u25B2";
+    card.classList.toggle("expanded", !open);
+  });
 
   card.appendChild(rank);
   card.appendChild(info);
+  card.appendChild(toggle);
 
-  // Relevance badge
   if (book.relevance != null) {
     const badge = document.createElement("div");
     badge.className = "relevance-badge";
@@ -146,4 +468,23 @@ function createCard(book) {
   }
 
   return card;
+}
+
+// ---- UI helpers ----
+
+function showLoading(msg) {
+  loading.querySelector("p").textContent = msg || "Loading...";
+  loading.classList.remove("hidden");
+  results.classList.add("hidden");
+  errorBox.classList.add("hidden");
+  pagination.classList.add("hidden");
+}
+
+function hideLoading() {
+  loading.classList.add("hidden");
+}
+
+function showError(msg) {
+  errorBox.textContent = msg;
+  errorBox.classList.remove("hidden");
 }

@@ -1,5 +1,7 @@
 # server/recommender/recommender.py (patched)
 
+import uuid
+
 from server.fetcher.fetcher import Fetcher
 from server.models.library import Library
 from server.preprocessing import Preprocessor
@@ -40,10 +42,13 @@ class Recommender:
         for b in books:
             self.library.add(b)
 
-        # 2) Preprocess
-        cleaned = {b.id: self.preprocessor.process(b.description)
-                   for b in self.library.all()}
-        tags    = {b.id: b.tags for b in self.library.all()}
+        # 2) Preprocess — combine title, tags, and description so all
+        #    signals contribute to similarity scoring
+        cleaned = {}
+        for b in self.library.all():
+            parts = [b.title, " ".join(b.tags), b.description]
+            cleaned[b.id] = self.preprocessor.process(" ".join(parts))
+        tags = {b.id: b.tags for b in self.library.all()}
 
         # 3) Vectorise & fit engine
         features, ids = self.extractor.fit_transform(cleaned, tags)
@@ -57,8 +62,14 @@ class Recommender:
         query = query.strip()
         if not query:
             return []
-        q_desc = {"__q__": self.preprocessor.process(query)}
-        q_tags = {"__q__": []}
+        qid    = f"__q_{uuid.uuid4().hex}__"
+        q_desc = {qid: self.preprocessor.process(query)}
+        q_tags = {qid: []}
         q_vec  = self.extractor.transform(q_desc, q_tags)
-        rec_ids = self.engine.recommend_for_vector(q_vec.toarray()[0], top_n)
-        return [self.library.get_by_id(i) for i in rec_ids]
+        scored = self.engine.recommend_for_vector(q_vec.toarray()[0], top_n)
+        results = []
+        for book_id, score in scored:
+            book = self.library.get_by_id(book_id)
+            if book:
+                results.append((book, round(score * 100, 1)))
+        return results

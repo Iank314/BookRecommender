@@ -9,16 +9,22 @@
 <body>
   <header>
     <h1>Book Recommender</h1>
-    <p class="subtitle">Search for books and discover recommendations</p>
+    <p class="subtitle">Search by title, author, or genre to discover books</p>
   </header>
 
   <main>
     <form id="search-form">
+      <div class="category-tabs">
+        <button type="button" class="tab active" data-category="title">Title</button>
+        <button type="button" class="tab" data-category="author">Author</button>
+        <button type="button" class="tab" data-category="genre">Genre</button>
+        <button type="button" class="tab library-tab" data-category="library">My Library</button>
+      </div>
       <div class="search-bar">
         <input
           type="text"
           id="search-input"
-          placeholder="Search for books... e.g. dark fantasy adventure"
+          placeholder="Search by title..."
           autocomplete="off"
         />
         <button type="submit" id="search-btn">Search</button>
@@ -27,7 +33,7 @@
 
     <div id="loading" class="hidden">
       <div class="spinner"></div>
-      <p>Fetching and analyzing books...</p>
+      <p>Searching and ranking books...</p>
     </div>
 
     <div id="error" class="hidden"></div>
@@ -36,6 +42,8 @@
       <h2 id="results-heading"></h2>
       <div id="results-container"></div>
     </section>
+
+    <div id="pagination" class="hidden"></div>
   </main>
 
   <script src="/static/app.js"></script>

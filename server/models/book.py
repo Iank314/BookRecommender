@@ -1,8 +1,11 @@
+from dataclasses import dataclass, field
+
+
+@dataclass
 class Books:
-    def __init__(self, id, title, authors, description, tags, metadata):
-        self.id = id
-        self.title = title
-        self.authors = authors
-        self.description = description
-        self.tags = tags
-        self.metadata = metadata 
+    id: str
+    title: str
+    authors: list[str] = field(default_factory=list)
+    description: str = ""
+    tags: list[str] = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)

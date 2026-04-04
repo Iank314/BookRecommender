@@ -34,11 +34,53 @@ main {
   padding: 0 1.5rem 4rem;
 }
 
+/* ---- Category Tabs ---- */
+.category-tabs {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 1.5rem;
+}
+
+.tab {
+  padding: 0.55rem 1.3rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border: 1px solid #2a2d35;
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  background: #1a1c24;
+  color: #8b8d97;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.tab:hover {
+  color: #e1e2e6;
+}
+
+.tab.library-tab {
+  margin-left: auto;
+  border-color: #3a5c3a;
+  color: #6fcf6f;
+}
+
+.tab.library-tab.active {
+  background: #2a5c2a;
+  border-color: #2a5c2a;
+  color: #fff;
+}
+
+.tab.active {
+  background: #5c6bc0;
+  color: #fff;
+  border-color: #5c6bc0;
+}
+
 /* ---- Search Bar ---- */
 .search-bar {
   display: flex;
   gap: 0.5rem;
-  margin-top: 1.5rem;
+  margin-top: 0;
 }
 
 #search-input {
@@ -152,10 +194,16 @@ main {
   border: 1px solid #2a2d35;
   border-radius: 8px;
   transition: border-color 0.2s;
+  cursor: pointer;
+  flex-wrap: wrap;
 }
 
 .book-card:hover {
   border-color: #3a3d4a;
+}
+
+.book-card.expanded {
+  border-color: #5c6bc0;
 }
 
 .book-rank {
@@ -201,6 +249,172 @@ main {
   color: #8b8d97;
 }
 
+/* Expand arrow */
+.book-expand {
+  display: flex;
+  align-items: center;
+  color: #3a3d4a;
+  font-size: 0.8rem;
+  flex-shrink: 0;
+  padding: 0 0.2rem;
+}
+
+/* Expanded details */
+.book-details {
+  width: 100%;
+  padding-top: 0.8rem;
+  margin-top: 0.6rem;
+  border-top: 1px solid #23252f;
+}
+
+.book-description {
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: #b0b1b8;
+  margin-bottom: 0.8rem;
+}
+
+.book-links {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.book-link {
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 0.35rem 0.8rem;
+  background: #23252f;
+  border: 1px solid #2a2d35;
+  border-radius: 6px;
+  color: #5c6bc0;
+  text-decoration: none;
+  transition: background 0.2s;
+}
+
+.book-link:hover {
+  background: #2a2d35;
+  color: #7986cb;
+}
+
+/* Find Similar button */
+.similar-btn {
+  margin-top: 0.7rem;
+  padding: 0.5rem 1.2rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  border: 1px solid #5c6bc0;
+  border-radius: 6px;
+  background: transparent;
+  color: #5c6bc0;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.similar-btn:hover {
+  background: #5c6bc0;
+  color: #fff;
+}
+
+/* Back to search button */
+.back-btn {
+  display: inline-block;
+  margin-bottom: 1.5rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border: 1px solid #2a2d35;
+  border-radius: 6px;
+  background: #1a1c24;
+  color: #8b8d97;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.back-btn:hover {
+  background: #23252f;
+  color: #e1e2e6;
+}
+
+/* Book action buttons row */
+.book-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.7rem;
+  flex-wrap: wrap;
+}
+
+/* Save to Library */
+.save-btn {
+  padding: 0.45rem 1rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  border: 1px solid #2a5c2a;
+  border-radius: 6px;
+  background: transparent;
+  color: #6fcf6f;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.save-btn:hover {
+  background: #2a5c2a;
+  color: #fff;
+}
+
+.save-btn.saved {
+  background: #1a2e1a;
+  border-color: #2a5c2a;
+  color: #4a9a4a;
+  cursor: default;
+}
+
+/* Remove from Library */
+.remove-btn {
+  padding: 0.45rem 1rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  border: 1px solid #5c2a2a;
+  border-radius: 6px;
+  background: transparent;
+  color: #cf6f6f;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.remove-btn:hover {
+  background: #5c2a2a;
+  color: #fff;
+}
+
+/* Recommend button in library */
+.recommend-btn {
+  display: block;
+  width: 100%;
+  padding: 0.8rem;
+  margin-bottom: 1.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  border: 1px solid #5c6bc0;
+  border-radius: 8px;
+  background: #5c6bc0;
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.recommend-btn:hover {
+  background: #7986cb;
+}
+
+/* Library hint */
+.library-hint {
+  color: #555;
+  font-size: 0.95rem;
+  text-align: center;
+  padding: 2rem 0;
+}
+
 /* Relevance badge */
 .relevance-badge {
   font-size: 0.82rem;
@@ -231,6 +445,43 @@ main {
   background: #2d1a1a;
   color: #cf6f6f;
   border: 1px solid #5c2a2a;
+}
+
+/* ---- Pagination ---- */
+#pagination {
+  display: flex;
+  justify-content: center;
+  gap: 0.4rem;
+  margin-top: 2rem;
+  padding-bottom: 3rem;
+}
+
+.page-btn {
+  padding: 0.5rem 0.9rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border: 1px solid #2a2d35;
+  border-radius: 6px;
+  background: #1a1c24;
+  color: #8b8d97;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.page-btn:hover:not(:disabled) {
+  background: #23252f;
+  color: #e1e2e6;
+}
+
+.page-btn.active {
+  background: #5c6bc0;
+  color: #fff;
+  border-color: #5c6bc0;
+}
+
+.page-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
 }
 
 /* ---- Utility ---- */
