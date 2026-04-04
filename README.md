@@ -1,130 +1,152 @@
-# BookReviews – Content-Based Book Recommender
+# BookRecommender — Content-Based Book Recommender
 
-A lightweight, offline-friendly recommender system that fetches books from **Google Books**, **Open Library**, or a local JSON file, then suggests similar titles—or recommends books based on free-text adjectives.
+## Next Features
+
+- **User database** — persistent storage for user accounts and their saved books (across sessions)
+- **Docker containerization** — package the app for easy deployment and consistent environments
+- **Similarity scoring improvements** — refine the relevance algorithm for better recommendation quality
+
+---
+
+A full-stack book recommendation system that searches **Google Books** and **Open Library**, scores results by relevance and popularity, and suggests similar titles using TF-IDF cosine similarity. Users can build a personal library and get recommendations based on their saved collection.
 
 ---
 
 ## Tech Stack
 
-| Layer | Library / Tool | Why |
-|-------|----------------|-----|
-| Language | **Python 3.11** | Rapid prototyping & rich AI/NLP ecosystem |
-| Data ops | **NumPy / SciPy** | Sparse matrices & fast linear algebra |
-| NLP + ML | **scikit-learn** | TF-IDF vectoriser, cosine similarity |
-| HTTP | **requests** | Simple, battle-tested REST client |
-| Testing | **pytest + unittest** | Fast, readable unit tests |
-| Packaging | Standard `__init__.py` packages | Keeps modules import-safe across scripts & tests |
+| Layer | Technology | Why |
+|-------|------------|-----|
+| Backend | **Python 3.11, FastAPI, Uvicorn** | Async-ready API with automatic docs |
+| Data & NLP | **NumPy, SciPy, scikit-learn** | TF-IDF vectorization, sparse matrices, cosine similarity |
+| HTTP | **requests** | REST client for Google Books & Open Library APIs |
+| Frontend | **HTML5, CSS3, vanilla JavaScript** | Lightweight single-page app, no framework overhead |
+| Testing | **pytest, unittest** | Fast, readable unit and integration tests |
 
 ---
 
-## How the Pieces Connect (Execution Order)
+## Features
 
-┌────────────┐ 1 query / file path
-│ script │──────────┐
-└────────────┘ │
-▼
-┌───────────────────────┐ 2 fetch Books objects
-│ Fetcher (Google / │
-│ OpenLibrary / JSON) │
-└───────────────────────┘
-▼ 3 add()
-┌────────────┐
-│ Library │ stores every Book
-└────────────┘
-▼ 4 preprocess descriptions
-┌──────────────────┐
-│ Preprocessor │ clean, lowercase, strip URLs …
-└──────────────────┘
-▼ 5 vectorise (TF-IDF + tag one-hot)
-┌──────────────────────┐
-│ FeatureExtractor │ → sparse matrix
-└──────────────────────┘
-▼ 6 fit()
-┌──────────────────────────┐
-│ RecommendationEngine │ cosine similarity matrix
-└──────────────────────────┘
-▼ 7 recommend()
-┌────────────┐
-│ Library │ lookup IDs → Book objects
-└────────────┘
+### Multi-Source Book Search
+- Search by **title**, **author**, or **genre** across Google Books and Open Library
+- Deduplicates results across APIs
+- Scores books 0–100 using a hybrid formula: match quality + popularity metrics (edition count, ratings, want-to-read signals)
+- Paginated results (20 per page) with relevance badges
 
-scripts/
-└─ demo_query.py ← sample CLI demo
-server/
-├─ features/ ← TF-IDF + tag encoder
-│ └─ features.py
-├─ fetcher/ ← Google, Open Library, local JSON
-│ └─ fetcher.py
-├─ models/
-│ ├─ book.py ← Books dataclass
-│ └─ library.py ← collection + CRUD/search
-├─ preprocessing/
-│ ├─ init.py ← re-exports Preprocessor
-│ └─ text_processor.py ← simple cleaner
-├─ recommender/
-│ ├─ recommendation_engine.py
-│ └─ recommender.py ← orchestrates full pipeline
-└─ tests/ ← pytest & unittest suites
+### Content-Based Recommendations
+- **Similar books**: given a book, fetches candidates matching its genres and ranks them by TF-IDF cosine similarity
+- **Free-text recommendations**: describe what you want ("whimsical bittersweet adventure") and get matched books
+- **Library-based recommendations**: recommendations drawn from the genres and descriptions of your entire saved collection
 
+### Personal Library
+- Save and remove books from an in-memory library
+- View all saved books in a dedicated tab
+- Get recommendations based on your full collection
 
-
-## Key Module & Method Overview
-
-### `server/fetcher/fetcher.py`
-
-| Method | Purpose |
-|--------|---------|
-| `fetch(query, max_results)` | Unified entry point; routes to local, Google, or Open Library |
-| `_fetch_google_books()`     | REST call → JSON items |
-| `_fetch_open_library()`     | REST call → docs |
-| `_fetch_from_file()`        | Read local `books.json` |
-
-### `server/models/library.py`
-
-| Method | Purpose |
-|--------|---------|
-| `add(book)` / `remove(id)` | Mutate in-memory store |
-| `get_by_id(id)`            | Fetch single Book |
-| `find_by_title/author/tag` | Substring searches |
-| `all()`                    | Return all books |
-
-### `server/preprocessing/text_processor.py`
-
-`process(text)` → Strip HTML & URLs, lowercase, remove punctuation, collapse spaces, optional stop-word drop.
-
-### `server/features/features.py`
-
-| Method | Purpose |
-|--------|---------|
-| `fit_transform(descs, tags)` | TF-IDF on descriptions + one-hot tags → sparse matrix & ID list |
-| `transform(descs, tags)`     | Same vector space for new data / queries |
-
-### `server/recommender/recommendation_engine.py`
-
-| Method | Purpose |
-|--------|---------|
-| `fit(matrix, ids)`           | Store features, pre-compute cosine matrix |
-| `recommend(book_id, k)`      | Top-*k* similar books |
-| `recommend_for_vector(vec,k)`| Similar books for arbitrary vector |
-
-### `server/recommender/recommender.py`
-
-| Method | Purpose |
-|--------|---------|
-| `build(query=…, max_results=…)` | fetch → preprocess → vectorise → fit |
-| `recommend(book_id, k)`         | Convenience wrapper |
-| `recommend_by_text(text, k)`    | Free-text adjectives → recommendations |
+### Frontend
+- Dark-themed single-page app with category tabs (Title / Author / Genre / My Library)
+- Book cards with expandable descriptions, relevance scores (color-coded), and external links (Google Books, Open Library, Google search)
+- "Find Similar" button on each result
+- Pagination with numbered page buttons
+- Loading spinner and error display
 
 ---
 
-## Running the Demo
+## How It Works
+
+```
+┌─────────────┐  query    ┌───────────────────────┐
+│  Frontend   │─────────► │  FastAPI  (/search)   │
+└─────────────┘           └───────────────────────┘
+                                    │
+                          ┌─────────┴─────────┐
+                          ▼                   ▼
+                   Google Books API    Open Library API
+                          │                   │
+                          └─────────┬─────────┘
+                                    ▼
+                          Deduplicate & Score
+                                    │
+                                    ▼
+                          Return paginated results
+```
+
+**Recommendation pipeline:**
+
+```
+Fetch candidates  →  Preprocess descriptions  →  TF-IDF + tag one-hot encoding
+     →  Cosine similarity matrix  →  Top-N similar books
+```
+
+---
+
+## Project Structure
+
+```
+BookRecommender/
+├── frontend/
+│   ├── index.html          Single-page app shell
+│   ├── app.js              Event handling & API calls
+│   └── style.css           Dark theme, responsive layout
+├── server/
+│   ├── app.py              FastAPI REST API
+│   ├── models/
+│   │   ├── book.py         Book dataclass
+│   │   └── library.py      In-memory collection + CRUD/search
+│   ├── fetcher/
+│   │   └── fetcher.py      Google Books + Open Library adapters
+│   ├── preprocessing/
+│   │   └── text_processor.py   HTML/URL stripping, lowercasing, cleanup
+│   ├── features/
+│   │   └── features.py     TF-IDF vectorizer + tag one-hot encoder
+│   └── recommender/
+│       ├── recommendation_engine.py   Cosine similarity engine
+│       └── recommender.py            Full pipeline orchestrator
+├── scripts/
+│   └── demo_query.py       CLI demo
+├── tests/
+│   ├── test_engine.py
+│   ├── test_pipeline.py
+│   └── test_recommender_edge.py
+├── requirements.txt
+└── README.md
+```
+
+---
+
+## API Endpoints
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| `GET` | `/` | Serve frontend |
+| `POST` | `/search` | Search books by title, author, or genre |
+| `POST` | `/similar` | Find books similar to a given book |
+| `GET` | `/library` | List saved books |
+| `POST` | `/library/add` | Save a book to library |
+| `DELETE` | `/library/{book_id}` | Remove a book from library |
+| `POST` | `/library/recommend` | Recommendations based on saved library |
+
+---
+
+## Running the App
 
 ```bash
-# Install deps
-python -m pip install -r requirements.txt   # numpy, scipy, scikit-learn, requests, pytest
+# Install dependencies
+python -m pip install -r requirements.txt
 
-# Live Google Books demo
+# Start the server
+uvicorn server.app:app --reload
+
+# Open http://localhost:8000 in your browser
+```
+
+### CLI Demo
+
+```bash
 python -m scripts.demo_query
+```
 
-# Run tests
+### Run Tests
+
+```bash
 python -m pytest
+```
