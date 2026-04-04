@@ -19,7 +19,7 @@ A full-stack book recommendation system that searches **Google Books** and **Ope
 | Backend | **Python 3.11, FastAPI, Uvicorn** | Async-ready API with automatic docs |
 | Data & NLP | **NumPy, SciPy, scikit-learn** | TF-IDF vectorization, sparse matrices, cosine similarity |
 | HTTP | **requests** | REST client for Google Books & Open Library APIs |
-| Frontend | **HTML5, CSS3, vanilla JavaScript** | Lightweight single-page app, no framework overhead |
+| Frontend | **HTML5, CSS3, JavaScript** | Lightweight single-page app, no framework overhead |
 | Testing | **pytest, unittest** | Fast, readable unit and integration tests |
 
 ---
