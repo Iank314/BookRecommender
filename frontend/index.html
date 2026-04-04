@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Book Recommender</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Book Recommender</h1>
+    <p class="subtitle">Search for books and discover recommendations</p>
+  </header>
+
+  <main>
+    <form id="search-form">
+      <div class="search-bar">
+        <input
+          type="text"
+          id="search-input"
+          placeholder="Search for books... e.g. dark fantasy adventure"
+          autocomplete="off"
+        />
+        <button type="submit" id="search-btn">Search</button>
+      </div>
+    </form>
+
+    <div id="loading" class="hidden">
+      <div class="spinner"></div>
+      <p>Fetching and analyzing books...</p>
+    </div>
+
+    <div id="error" class="hidden"></div>
+
+    <section id="results" class="hidden">
+      <h2 id="results-heading"></h2>
+      <div id="results-container"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
