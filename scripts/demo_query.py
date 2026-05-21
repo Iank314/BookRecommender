@@ -14,8 +14,8 @@ def main() -> None:
 
     # Free-text recommendation
     picks = rec.recommend_by_text("whimsical bittersweet adventure", top_n=5)
-    for b in picks:
-        print(f"{b.title} — {', '.join(b.authors)}")
+    for book, score in picks:
+        print(f"{book.title} - {', '.join(book.authors)} ({score:.1f}%)")
 
 if __name__ == "__main__":
     main()

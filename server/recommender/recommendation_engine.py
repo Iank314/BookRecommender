@@ -38,6 +38,18 @@ class RecommendationEngine:
         best = [i for i in best_idxs if i != idx][:top_n]
         return [self.ids[i] for i in best]
 
+    def recommend_with_scores(self, book_id: str, top_n: int = 5) -> list[tuple[str, float]]:
+        if self.ids is None or self.sim_matrix is None:
+            raise RuntimeError("Engine has not been fitted yet.")
+        try:
+            idx = self.ids.index(book_id)
+        except ValueError:
+            return []
+        sims = self.sim_matrix[idx]
+        order = np.argsort(sims)[::-1]
+        picks = [i for i in order if i != idx][:top_n]
+        return [(self.ids[i], float(sims[i])) for i in picks]
+
     # ------------------------------------------------------------------
     # Free‑text / feature‑vector recommendation
     # ------------------------------------------------------------------
