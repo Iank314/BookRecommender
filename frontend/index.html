@@ -8,6 +8,11 @@
 </head>
 <body>
   <header>
+    <div id="auth-bar">
+      <span id="auth-status"></span>
+      <button type="button" id="auth-login-btn" class="auth-btn hidden">Log in</button>
+      <button type="button" id="auth-logout-btn" class="auth-btn hidden">Log out</button>
+    </div>
     <h1>Book Recommender</h1>
     <p class="subtitle">Search by title, author, or genre to discover books</p>
   </header>
@@ -45,6 +50,23 @@
 
     <div id="pagination" class="hidden"></div>
   </main>
+
+  <div id="auth-modal" class="hidden">
+    <div class="auth-card">
+      <button type="button" id="auth-close" class="auth-close" aria-label="Close">&times;</button>
+      <h2 id="auth-title">Log in</h2>
+      <form id="auth-form">
+        <input type="text" id="auth-username" placeholder="Username" autocomplete="username" />
+        <input type="password" id="auth-password" placeholder="Password" autocomplete="current-password" />
+        <div id="auth-error" class="auth-error hidden"></div>
+        <button type="submit" id="auth-submit">Log in</button>
+      </form>
+      <p class="auth-toggle">
+        <span id="auth-toggle-text">Don't have an account?</span>
+        <button type="button" id="auth-toggle-btn">Sign up</button>
+      </p>
+    </div>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

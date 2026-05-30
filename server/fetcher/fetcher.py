@@ -7,6 +7,8 @@ and return them as `Books` instances.
 from __future__ import annotations
 
 import json
+import os
+import threading
 import time
 from typing import List, Optional
 
@@ -19,6 +21,76 @@ from server.models.book import Books
 
 GOOGLE_ENDPOINT  = "https://www.googleapis.com/books/v1/volumes"
 OPENLIB_ENDPOINT = "https://openlibrary.org/search.json"
+OPENLIB_BASE     = "https://openlibrary.org"
+
+# (connect, read) timeouts — fail fast instead of stalling ~60s on a dead socket.
+_HTTP_TIMEOUT = (5, 15)
+
+# In-memory response cache so repeated genre queries (litrpg, fantasy, ...) across
+# /search, /similar and /library/recommend don't re-hit the APIs within the TTL.
+_CACHE_TTL = 600.0  # seconds
+_cache: dict[str, tuple[float, dict]] = {}
+_cache_lock = threading.Lock()
+
+# Cap concurrent Google Books requests. Unauthenticated Google has a very low
+# per-IP limit, and we fan genre queries out across a thread pool; without this
+# they all fire at once and trip 429. An API key raises the ceiling but this
+# keeps us polite regardless.
+_GB_SEMAPHORE = threading.Semaphore(3)
+
+# Circuit breaker: once Google Books 429s, stop calling it for a cooldown window
+# so we fail fast (and politely) instead of retry-sleeping on every later query.
+_GB_COOLDOWN_SECONDS = 60.0
+_gb_cooldown_until = 0.0
+_gb_state_lock = threading.Lock()
+
+
+def _gb_in_cooldown() -> bool:
+    with _gb_state_lock:
+        return time.time() < _gb_cooldown_until
+
+
+def _set_gb_cooldown() -> None:
+    global _gb_cooldown_until
+    with _gb_state_lock:
+        _gb_cooldown_until = time.time() + _GB_COOLDOWN_SECONDS
+
+
+def _cache_key(url: str, params: dict | None) -> str:
+    items = sorted((params or {}).items())
+    return url + "?" + "&".join(f"{k}={v}" for k, v in items)
+
+
+def _get_json(url: str, params: dict | None, *,
+              semaphore: threading.Semaphore | None = None,
+              retries: int = 0) -> dict:
+    """GET JSON with a TTL cache, optional concurrency cap, and 429 backoff."""
+    key = _cache_key(url, params)
+    with _cache_lock:
+        hit = _cache.get(key)
+        if hit and (time.time() - hit[0]) < _CACHE_TTL:
+            return hit[1]
+
+    attempt = 0
+    while True:
+        if semaphore is not None:
+            semaphore.acquire()
+        try:
+            resp = requests.get(url, params=params, timeout=_HTTP_TIMEOUT)
+        finally:
+            if semaphore is not None:
+                semaphore.release()
+        if resp.status_code == 429 and attempt < retries:
+            retry_after = resp.headers.get("Retry-After")
+            wait = float(retry_after) if (retry_after or "").isdigit() else 0.5 * (2 ** attempt)
+            time.sleep(min(wait, 5.0))
+            attempt += 1
+            continue
+        resp.raise_for_status()
+        data = resp.json()
+        with _cache_lock:
+            _cache[key] = (time.time(), data)
+        return data
 
 
 class Fetcher:
@@ -65,6 +137,31 @@ class Fetcher:
                                         start_index=start_index,
                                         return_total=True)
 
+    def fetch_work_detail(self, work_key: str):
+        """Fetch an Open Library work's full description + subjects.
+
+        `work_key` is an OL work path like "/works/OL12345W". Best-effort:
+        returns (description, subjects) and ("", []) on any failure, since this
+        is used only to enrich already-fetched candidates.
+        """
+        if requests is None:  # pragma: no cover
+            return "", []
+        key = work_key.strip()
+        if not key.startswith("/"):
+            key = "/" + key
+        try:
+            data = _get_json(f"{OPENLIB_BASE}{key}.json", None)
+        except Exception:
+            return "", []
+
+        desc = data.get("description", "")
+        if isinstance(desc, dict):
+            desc = desc.get("value", "")
+        subjects = data.get("subjects", [])
+        if not isinstance(subjects, list):
+            subjects = []
+        return str(desc or ""), [str(s) for s in subjects]
+
     # ------------------------------------------------------------------ #
     # Local JSON
     # ------------------------------------------------------------------ #
@@ -96,6 +193,10 @@ class Fetcher:
         if requests is None:  # pragma: no cover
             raise ImportError("Install `requests` to use Google Books fetching.")
 
+        # Recently rate-limited — skip the call and let Open Library carry this run.
+        if _gb_in_cooldown():
+            return ([], 0) if return_total else []
+
         # Build category-targeted query for Google Books
         if category == "title":
             q = f"intitle:{query}"
@@ -111,12 +212,19 @@ class Fetcher:
             "maxResults": min(max_results, 40),  # Google caps at 40
             "startIndex": start_index,
         }
-        if self.api_key:
-            params["key"] = self.api_key
+        key = self.api_key or os.environ.get("GOOGLE_BOOKS_API_KEY")
+        if key:
+            params["key"] = key
 
-        resp = requests.get(GOOGLE_ENDPOINT, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            data = _get_json(GOOGLE_ENDPOINT, params,
+                             semaphore=_GB_SEMAPHORE, retries=1)
+        except requests.exceptions.HTTPError as exc:
+            resp = getattr(exc, "response", None)
+            if resp is not None and resp.status_code == 429:
+                _set_gb_cooldown()  # back off Google for a while, lean on OL
+                return ([], 0) if return_total else []
+            raise
         items = data.get("items", [])
         total = data.get("totalItems", 0)
         books = [self._from_google_item(it) for it in items]
@@ -138,6 +246,7 @@ class Fetcher:
                 "publishedDate": info.get("publishedDate"),
                 "pageCount": info.get("pageCount"),
                 "infoLink": info.get("infoLink"),
+                "language": info.get("language"),
                 "source": "google_books",
             },
         )
@@ -161,9 +270,7 @@ class Fetcher:
         else:
             params = {"q": query, "limit": max_results, "offset": offset}
 
-        resp = requests.get(OPENLIB_ENDPOINT, params=params, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
+        data = _get_json(OPENLIB_ENDPOINT, params)
         docs = data.get("docs", [])
         total = data.get("numFound", 0)
         return [self._from_openlib_doc(doc) for doc in docs], total
@@ -194,6 +301,9 @@ class Fetcher:
                 parts.append(f"By {', '.join(authors[:3])}.")
             raw = " | ".join(parts) if parts else ""
 
+        languages = doc.get("language", []) or []
+        language = languages[0] if isinstance(languages, list) and languages else None
+
         return Books(
             id=f"ol_{doc.get('key', '')}",
             title=doc.get("title", ""),
@@ -207,6 +317,7 @@ class Fetcher:
                 "ratings_count": doc.get("ratings_count", 0),
                 "want_to_read_count": doc.get("want_to_read_count", 0),
                 "already_read_count": doc.get("already_read_count", 0),
+                "language": language,
                 "source": "open_library",
             },
         )

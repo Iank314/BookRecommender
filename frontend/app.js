@@ -12,11 +12,28 @@ const tabs       = document.querySelectorAll(".tab");
 const pagination = document.getElementById("pagination");
 const searchBar  = document.querySelector(".search-bar");
 
+// Auth elements
+const authStatus    = document.getElementById("auth-status");
+const authLoginBtn  = document.getElementById("auth-login-btn");
+const authLogoutBtn = document.getElementById("auth-logout-btn");
+const authModal     = document.getElementById("auth-modal");
+const authClose     = document.getElementById("auth-close");
+const authTitle     = document.getElementById("auth-title");
+const authForm      = document.getElementById("auth-form");
+const authUsername  = document.getElementById("auth-username");
+const authPassword  = document.getElementById("auth-password");
+const authError     = document.getElementById("auth-error");
+const authSubmit    = document.getElementById("auth-submit");
+const authToggleText = document.getElementById("auth-toggle-text");
+const authToggleBtn  = document.getElementById("auth-toggle-btn");
+
 let activeCategory = "title";
 let lastQuery = "";
 let currentPage = 1;
 let totalPages = 0;
 let viewMode = "search"; // "search" | "library"
+let currentUser = null;  // username string when logged in, else null
+let authMode = "login";  // "login" | "register"
 
 const placeholders = {
   title:  "Search by title... e.g. Harry Potter",
@@ -43,6 +60,100 @@ tabs.forEach((tab) => {
     }
   });
 });
+
+// ---- Auth ----
+
+async function checkAuth() {
+  try {
+    const res = await fetch(`${API}/auth/me`);
+    currentUser = res.ok ? (await res.json()).username : null;
+  } catch {
+    currentUser = null;
+  }
+  renderAuthBar();
+}
+
+function renderAuthBar() {
+  if (currentUser) {
+    authStatus.textContent = `Signed in as ${currentUser}`;
+    authLoginBtn.classList.add("hidden");
+    authLogoutBtn.classList.remove("hidden");
+  } else {
+    authStatus.textContent = "";
+    authLoginBtn.classList.remove("hidden");
+    authLogoutBtn.classList.add("hidden");
+  }
+}
+
+function openAuth(mode = "login") {
+  authMode = mode;
+  updateAuthModal();
+  authError.classList.add("hidden");
+  authForm.reset();
+  authModal.classList.remove("hidden");
+  authUsername.focus();
+}
+
+function closeAuth() {
+  authModal.classList.add("hidden");
+}
+
+function updateAuthModal() {
+  const isLogin = authMode === "login";
+  authTitle.textContent = isLogin ? "Log in" : "Sign up";
+  authSubmit.textContent = isLogin ? "Log in" : "Create account";
+  authToggleText.textContent = isLogin ? "Don't have an account?" : "Already have an account?";
+  authToggleBtn.textContent = isLogin ? "Sign up" : "Log in";
+  authPassword.autocomplete = isLogin ? "current-password" : "new-password";
+}
+
+authLoginBtn.addEventListener("click", () => openAuth("login"));
+authClose.addEventListener("click", closeAuth);
+authModal.addEventListener("click", (e) => {
+  if (e.target === authModal) closeAuth();
+});
+
+authToggleBtn.addEventListener("click", () => {
+  authMode = authMode === "login" ? "register" : "login";
+  authError.classList.add("hidden");
+  updateAuthModal();
+});
+
+authForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const username = authUsername.value.trim();
+  const password = authPassword.value;
+  if (!username || !password) return;
+  const endpoint = authMode === "login" ? "/auth/login" : "/auth/register";
+  authSubmit.disabled = true;
+  try {
+    const res = await fetch(`${API}${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.detail || "Authentication failed");
+    currentUser = data.username;
+    renderAuthBar();
+    closeAuth();
+    if (activeCategory === "library") loadLibrary();
+  } catch (err) {
+    authError.textContent = err.message;
+    authError.classList.remove("hidden");
+  } finally {
+    authSubmit.disabled = false;
+  }
+});
+
+authLogoutBtn.addEventListener("click", async () => {
+  try { await fetch(`${API}/auth/logout`, { method: "POST" }); } catch {}
+  currentUser = null;
+  renderAuthBar();
+  if (activeCategory === "library") loadLibrary();
+});
+
+checkAuth();
 
 // Search form
 form.addEventListener("submit", async (e) => {
@@ -104,9 +215,11 @@ function renderResults(books, query, category, total, page) {
 // ---- Library ----
 
 async function loadLibrary() {
+  if (!currentUser) { renderLoginPrompt(); return; }
   showLoading("Loading your library...");
   try {
     const res = await fetch(`${API}/library`);
+    if (res.status === 401) { currentUser = null; renderAuthBar(); renderLoginPrompt(); return; }
     if (!res.ok) throw new Error("Failed to load library");
     const books = await res.json();
     renderLibrary(books);
@@ -115,6 +228,26 @@ async function loadLibrary() {
   } finally {
     hideLoading();
   }
+}
+
+function renderLoginPrompt() {
+  hideLoading();
+  container.innerHTML = "";
+  pagination.classList.add("hidden");
+  heading.textContent = "Your personal library";
+
+  const hint = document.createElement("p");
+  hint.className = "library-hint";
+  hint.textContent = "Log in to save books and build your personal library across devices.";
+  container.appendChild(hint);
+
+  const loginBtn = document.createElement("button");
+  loginBtn.className = "recommend-btn library-login-btn";
+  loginBtn.textContent = "Log in or sign up";
+  loginBtn.addEventListener("click", () => openAuth("login"));
+  container.appendChild(loginBtn);
+
+  results.classList.remove("hidden");
 }
 
 function renderLibrary(books) {
@@ -401,6 +534,7 @@ function createCard(book, options = {}) {
     saveBtn.textContent = "Save to Library";
     saveBtn.addEventListener("click", async (e) => {
       e.stopPropagation();
+      if (!currentUser) { openAuth("login"); return; }
       const ok = await saveToLibrary(book);
       if (ok) {
         saveBtn.textContent = "Saved!";
