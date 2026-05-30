@@ -416,6 +416,68 @@ main {
   padding: 2rem 0;
 }
 
+/* Saved / Liked / Disliked view switcher */
+.library-tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.library-tab {
+  flex: 1;
+  padding: 0.55rem 0.8rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: transparent;
+  color: #888;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s, border-color 0.2s;
+}
+
+.library-tab:hover {
+  background: #1a1a1a;
+  color: #ccc;
+}
+
+.library-tab.active {
+  background: #2a2f4a;
+  border-color: #5c6bc0;
+  color: #fff;
+  cursor: default;
+}
+
+/* Thumbs up / thumbs down */
+.feedback-btn {
+  padding: 0.4rem 0.7rem;
+  font-size: 0.95rem;
+  line-height: 1;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s, transform 0.1s;
+}
+
+.feedback-btn:hover {
+  background: #1a1a1a;
+}
+
+.feedback-btn:active {
+  transform: scale(0.95);
+}
+
+.like-btn.active {
+  background: #1a2e1a;
+  border-color: #2a5c2a;
+}
+
+.dislike-btn.active {
+  background: #2e1a1a;
+  border-color: #5c2a2a;
+}
+
 /* Relevance badge */
 .relevance-badge {
   font-size: 0.82rem;

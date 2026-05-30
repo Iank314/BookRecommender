@@ -32,6 +32,7 @@ let lastQuery = "";
 let currentPage = 1;
 let totalPages = 0;
 let viewMode = "search"; // "search" | "library"
+let libraryView = "saved"; // "saved" | "liked" | "disliked"
 let currentUser = null;  // username string when logged in, else null
 let authMode = "login";  // "login" | "register"
 
@@ -216,13 +217,18 @@ function renderResults(books, query, category, total, page) {
 
 async function loadLibrary() {
   if (!currentUser) { renderLoginPrompt(); return; }
-  showLoading("Loading your library...");
+  const labels = { saved: "Saved", liked: "Liked", disliked: "Disliked" };
+  showLoading(`Loading your ${labels[libraryView].toLowerCase()} books...`);
   try {
-    const res = await fetch(`${API}/library`);
+    let url;
+    if (libraryView === "saved") url = `${API}/library`;
+    else url = `${API}/library/feedback?kind=${libraryView === "liked" ? "up" : "down"}`;
+
+    const res = await fetch(url);
     if (res.status === 401) { currentUser = null; renderAuthBar(); renderLoginPrompt(); return; }
     if (!res.ok) throw new Error("Failed to load library");
     const books = await res.json();
-    renderLibrary(books);
+    renderLibrary(books, labels[libraryView]);
   } catch (err) {
     showError(err.message);
   } finally {
@@ -250,30 +256,62 @@ function renderLoginPrompt() {
   results.classList.remove("hidden");
 }
 
-function renderLibrary(books) {
+function renderLibrary(books, label) {
   container.innerHTML = "";
   pagination.classList.add("hidden");
 
+  // View switcher: Saved / Liked / Disliked. Clicking refetches the chosen
+  // section. Active state is purely visual; libraryView is the source of truth.
+  const tabs = document.createElement("div");
+  tabs.className = "library-tabs";
+  const switcherSpec = [
+    { key: "saved", label: "Saved" },
+    { key: "liked", label: "Liked" },
+    { key: "disliked", label: "Disliked" },
+  ];
+  for (const { key, label: tabLabel } of switcherSpec) {
+    const btn = document.createElement("button");
+    btn.className = "library-tab" + (libraryView === key ? " active" : "");
+    btn.textContent = tabLabel;
+    btn.addEventListener("click", () => {
+      if (libraryView === key) return;
+      libraryView = key;
+      loadLibrary();
+    });
+    tabs.appendChild(btn);
+  }
+  container.appendChild(tabs);
+
   if (books.length === 0) {
-    heading.textContent = "Your library is empty";
+    heading.textContent = `${label} (0 books)`;
     const hint = document.createElement("p");
     hint.className = "library-hint";
-    hint.textContent = 'Search for books and click "Save to Library" to build your collection.';
+    hint.textContent = libraryView === "saved"
+      ? 'Search for books and click "Save to Library" to build your collection.'
+      : libraryView === "liked"
+        ? "Books you give a 👍 will appear here and boost similar recommendations."
+        : "Books you give a 👎 will appear here and suppress similar recommendations.";
     container.appendChild(hint);
     results.classList.remove("hidden");
     return;
   }
 
-  heading.textContent = `My Library (${books.length} books)`;
+  heading.textContent = `${label} (${books.length} books)`;
 
-  // Recommend button
-  const recBtn = document.createElement("button");
-  recBtn.className = "recommend-btn";
-  recBtn.textContent = "Get Recommendations Based on My Library";
-  recBtn.addEventListener("click", getLibraryRecommendations);
-  container.appendChild(recBtn);
+  // Recommend button only makes sense on the saved view — feedback alone
+  // can't drive recs without a base library.
+  if (libraryView === "saved") {
+    const recBtn = document.createElement("button");
+    recBtn.className = "recommend-btn";
+    recBtn.textContent = "Get Recommendations Based on My Library";
+    recBtn.addEventListener("click", getLibraryRecommendations);
+    container.appendChild(recBtn);
+  }
 
-  renderBookList(books, 0, { showRemove: true });
+  // The Remove action differs by view: saved → DELETE /library/{id},
+  // liked/disliked → DELETE /library/feedback/{id}.
+  const removeAction = libraryView === "saved" ? removeFromLibrary : removeFeedback;
+  renderBookList(books, 0, { showRemove: true, removeAction });
   results.classList.remove("hidden");
 }
 
@@ -299,6 +337,34 @@ async function removeFromLibrary(bookId) {
     const res = await fetch(`${API}/library/${encodeURIComponent(bookId)}`, { method: "DELETE" });
     if (!res.ok) throw new Error("Failed to remove");
     return true;
+  } catch {
+    return false;
+  }
+}
+
+async function setFeedback(book, kind) {
+  try {
+    const res = await fetch(`${API}/library/feedback`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: book.id, title: book.title, authors: book.authors,
+        description: book.description || "", tags: book.tags,
+        metadata: book.metadata || {}, kind,
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function removeFeedback(bookId) {
+  try {
+    const res = await fetch(`${API}/library/feedback/${encodeURIComponent(bookId)}`, {
+      method: "DELETE",
+    });
+    return res.ok;
   } catch {
     return false;
   }
@@ -545,14 +611,16 @@ function createCard(book, options = {}) {
     actions.appendChild(saveBtn);
   }
 
-  // Remove from Library button
+  // Remove button — wired to whatever action the caller passed
+  // (removeFromLibrary for saved, removeFeedback for liked/disliked).
   if (options.showRemove) {
+    const remover = options.removeAction || removeFromLibrary;
     const removeBtn = document.createElement("button");
     removeBtn.className = "remove-btn";
-    removeBtn.textContent = "Remove from Library";
+    removeBtn.textContent = "Remove";
     removeBtn.addEventListener("click", async (e) => {
       e.stopPropagation();
-      const ok = await removeFromLibrary(book.id);
+      const ok = await remover(book.id);
       if (ok) {
         card.style.opacity = "0.3";
         removeBtn.textContent = "Removed";
@@ -571,6 +639,45 @@ function createCard(book, options = {}) {
     findSimilar(book);
   });
   actions.appendChild(similarBtn);
+
+  // Thumbs-up / thumbs-down. Server is idempotent; clicking the active
+  // direction clears the feedback, clicking the other direction flips it.
+  // `book.kind` is set by /library/feedback list responses; rec/search/
+  // similar responses leave it undefined and the buttons start neutral.
+  if (currentUser) {
+    let currentKind = book.kind || null;
+
+    const likeBtn = document.createElement("button");
+    const dislikeBtn = document.createElement("button");
+    const paint = () => {
+      likeBtn.classList.toggle("active", currentKind === "up");
+      dislikeBtn.classList.toggle("active", currentKind === "down");
+    };
+
+    likeBtn.className = "feedback-btn like-btn";
+    likeBtn.textContent = "👍";
+    likeBtn.title = "I like books like this — boost similar recommendations";
+    likeBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const target = currentKind === "up" ? null : "up";
+      const ok = target ? await setFeedback(book, "up") : await removeFeedback(book.id);
+      if (ok) { currentKind = target; paint(); }
+    });
+
+    dislikeBtn.className = "feedback-btn dislike-btn";
+    dislikeBtn.textContent = "👎";
+    dislikeBtn.title = "Don't recommend books like this";
+    dislikeBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const target = currentKind === "down" ? null : "down";
+      const ok = target ? await setFeedback(book, "down") : await removeFeedback(book.id);
+      if (ok) { currentKind = target; paint(); }
+    });
+
+    paint();
+    actions.appendChild(likeBtn);
+    actions.appendChild(dislikeBtn);
+  }
 
   details.appendChild(actions);
   info.appendChild(details);

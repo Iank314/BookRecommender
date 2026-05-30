@@ -12,8 +12,47 @@ services:
       # Where the SQLite DB lives inside the container (the volume below maps
       # the host's ./data into this path).
       BOOKREC_DB_PATH: /app/data/library.db
+      # Set to "true" when serving over HTTPS (any Cloudflare Tunnel run does
+      # this for you) so the session cookie is only sent on secure connections.
+      # Unset for local HTTP dev — otherwise browsers won't send it back.
+      BOOKREC_SECURE_COOKIES: ${BOOKREC_SECURE_COOKIES:-}
     volumes:
       # Persist accounts, sessions, and saved libraries across container
       # restarts and rebuilds.
       - ./data:/app/data
+    restart: unless-stopped
+
+  # --- Cloudflare Tunnel (opt-in) ------------------------------------------
+  # Both tunnel modes are off by default. Bring one up with `--profile`:
+  #   docker compose --profile public up -d         # Quick Tunnel
+  #   docker compose --profile public-named up -d   # Named Tunnel (needs token)
+
+  # Quick Tunnel — zero setup, no Cloudflare account or domain required.
+  # Gives a random *.trycloudflare.com URL that changes every restart. Good
+  # for "let me share this for a day," not for a stable public link.
+  # Find the URL in the container logs: `docker compose logs cloudflared`.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate --url http://bookrec:8000
+    depends_on:
+      - bookrec
+    profiles: ["public"]
+    restart: unless-stopped
+
+  # Named Tunnel — stable URL bound to a domain you own on Cloudflare.
+  # In the Cloudflare dashboard: Zero Trust → Networks → Tunnels → Create.
+  # Copy the connector token and set CLOUDFLARE_TUNNEL_TOKEN on the host
+  # (or in a .env file next to this compose file) before bringing it up.
+  # The route from the tunnel's public hostname → http://bookrec:8000 is
+  # configured in the Cloudflare dashboard, not here.
+  cloudflared-named:
+    image: cloudflare/cloudflared:latest
+    # If CLOUDFLARE_TUNNEL_TOKEN isn't set the container will fail fast with
+    # cloudflared's own "token is empty" error — we use a soft default rather
+    # than ${VAR:?error} because compose interpolates across every service at
+    # validation time, regardless of which profile is active.
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      - bookrec
+    profiles: ["public-named"]
     restart: unless-stopped
