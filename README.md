@@ -1,18 +1,31 @@
 # BookRecommender — Content-Based Book Recommender
 
+## Status — what's happening now
+
+**Live deployment.** The app is being put online from a home machine via a Cloudflare Tunnel: Docker Compose runs `bookrec` + `cloudflared`, with the SQLite DB persisting under `./data/library.db` and the tunnel handing out an HTTPS URL. See [Share publicly with Cloudflare Tunnel](#share-publicly-with-cloudflare-tunnel) below for the runbook.
+
+**Active iteration.** Recent work has been on recommendation-quality bug fixes surfaced by real use of the live app — categorization heuristics (facet-prefixed tags, series-name vs. genre ranking, genre derivation from description text), foreign-edition language detection (title script wins over metadata), and sequel detection from descriptions ("the fourth book in...", "the last book in this series"). The pattern lately is: try the app → spot a bad recommendation → add a small targeted fix + a regression test.
+
+**Planned next deployment stage.** Once the self-hosted version has settled, migrate off SQLite to managed Postgres (Neon's free tier) and deploy the container to Koyeb's free Nano tier — the free Koyeb plan has no persistent volumes, so the migration is the blocker, not scale. Scope: rewrite the three stores (`users_db`, `library_db`, `feedback_db`) to use `psycopg`, swap SQL flavors (parameter style, `strftime` → `extract(epoch)`, `ON CONFLICT` syntax), point at a `DATABASE_URL` env var, update tests. Roughly 2–3 hours.
+
+---
+
 ## Next Features
 
 **Recommendation quality**
+- **Series-name extraction from prose** — today, when a candidate's title carries no volume marker but the description says *"the fourth book in the Hitchhiker's Trilogy"*, the recommender drops the candidate rather than recommend a stranger to start mid-series. Better: extract the series name from phrases like *"in the X Trilogy"* / *"part of the Y series"* and run the existing `_entry_point_book` lookup against it, so book 1 gets swapped in instead of the sequel being dropped. The hard part is keeping false positives low (*"in the tradition of the X series"*, *"like the Y trilogy"*).
 - **Smarter nonfiction/homonym filtering** — catch tagless nonfiction and homonym genres (e.g. "magic" the occult topic vs. fantasy magic, "cultivation" the agriculture topic vs. the xianxia genre) by curating nonfiction subject markers and weighting specific genres over broad ones
 - **Semantic similarity (embeddings)** — sentence-embed descriptions for better "writing style" matching than token overlap (adds a model dependency, so only if token scoring plateaus)
 
 **Robustness & polish**
 - **Verify Google Books end-to-end with an API key** — confirm Google actually contributes results (unauthenticated testing keeps hitting the rate limit and falling back to Open Library)
+- **Litestream backup for the self-hosted DB** — replicate `data/library.db` continuously to a free Cloudflare R2 or Backblaze B2 bucket, so a disk failure on the host doesn't lose every account. ~1 hour to wire up; turns the current single-disk SPOF into recoverable state without changing the SQLite story.
+- **Stale-cache busting on display-layer changes** — the in-process rec cache keys on `(user, library_signature, top_n)` but not on backend code version, so a deploy that changes `_to_out` or `_clean_tags_for_display` lets stale cached payloads outlive the upgrade. Adding a small `CACHE_VERSION` constant to the signature would force a clean re-score after each release.
 
 **Product**
 - **Reading status** — want-to-read / reading / read on library books, and recommend from only the "read" ones
 - **Account management** — password reset and email verification (currently username + password only)
-- **Move off self-hosting to a managed deploy** — currently runs at home via Cloudflare Tunnel, so uptime is tied to one machine. The planned next step is to migrate the three SQLite stores (`users_db`, `library_db`, `feedback_db`) to Postgres via `psycopg`, deploy the container to Koyeb's free Nano tier, and use Neon's free Postgres tier as the database. Roughly a 2–3 hour migration: rewrite the three stores, swap SQL flavors (parameter style, `strftime` → `extract(epoch)`, `ON CONFLICT` syntax), point at a `DATABASE_URL` env var, and update tests. The free Koyeb tier has no persistent volumes so SQLite isn't an option there — managed Postgres is the actual blocker driving the migration, not scale.
+- **Per-IP rate limiting** — the login throttle is per-username, which targets credential stuffing but lets a single attacker spread guesses across many usernames. A per-IP layer on top, once we're behind Cloudflare's `CF-Connecting-IP` header, closes that gap.
 
 ---
 
