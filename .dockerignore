@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Dev DB and secrets — must not bake into the image
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+
+# VCS / IDE / OS
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+.DS_Store
+
+# Tests & docs aren't needed at runtime
+tests/
+README.md
+
+# Container files themselves
+Dockerfile
+.dockerignore
+docker-compose.yml

@@ -1,0 +1,19 @@
+services:
+  bookrec:
+    build: .
+    image: bookrecommender:latest
+    container_name: bookrec
+    ports:
+      - "8000:8000"
+    environment:
+      # Optional: raises Google Books' per-IP rate limit. Read from the host
+      # env if set, otherwise unset inside the container.
+      GOOGLE_BOOKS_API_KEY: ${GOOGLE_BOOKS_API_KEY:-}
+      # Where the SQLite DB lives inside the container (the volume below maps
+      # the host's ./data into this path).
+      BOOKREC_DB_PATH: /app/data/library.db
+    volumes:
+      # Persist accounts, sessions, and saved libraries across container
+      # restarts and rebuilds.
+      - ./data:/app/data
+    restart: unless-stopped
