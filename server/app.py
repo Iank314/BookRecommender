@@ -965,18 +965,21 @@ def _norm_lang(code: str | None) -> str:
 
 
 def _book_language(book: Books) -> str | None:
-    """Best guess at a book's language: stored code if present, else inferred
-    from the script of its title.
+    """Best guess at a book's language: title script is dispositive, with
+    metadata only consulted when the title is Latin-script.
 
-    The title is used — not the description — because Open Library synthesises
-    an *English* description ("Subjects: ... First published in ...") even for
-    foreign books, which would otherwise make a Japanese or Russian title read
-    as English.
+    Title script trumps metadata because Google Books and Open Library
+    routinely label foreign-script titles with `language="en"` — the
+    description is in English ("First published in 2005. | By 荒川弘.") so
+    their classifier picks English even though the title is plainly Japanese.
+    Trusting metadata over script let foreign editions slip into all-English
+    library recommendations.
     """
-    code = _norm_lang((book.metadata or {}).get("language"))
-    if code:
-        return code
     probe = (book.title or "").strip() or (book.description or "")
+    # Script-based detection runs first. Hiragana/Katakana is a strong
+    # Japanese signal; Hangul → Korean; Cyrillic → Russian. CJK ideographs
+    # alone are ambiguous between Chinese and Japanese, so they only fire
+    # when no Kana was present.
     if re.search(r"[぀-ヿ]", probe):      # Hiragana / Katakana → Japanese
         return "ja"
     if re.search(r"[가-힯]", probe):       # Hangul → Korean
@@ -985,6 +988,11 @@ def _book_language(book: Books) -> str | None:
         return "zh"
     if re.search(r"[Ѐ-ӿ]", probe):       # Cyrillic → Russian
         return "ru"
+    # Latin-script title — now consult metadata, fall back to Latin/non-Latin
+    # ratio if nothing is recorded.
+    code = _norm_lang((book.metadata or {}).get("language"))
+    if code:
+        return code
     latin = len(re.findall(r"[A-Za-z]", probe))
     nonlatin = len(re.findall(r"[^\x00-\x7f]", probe))
     if not probe or latin >= nonlatin:
@@ -1011,12 +1019,31 @@ _VOLUME_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Written-out volume numbers — "Book Three", "Volume Five". A volume keyword
+# (book/volume/etc.) is required so titles like "The Three Musketeers" don't
+# accidentally match.
+_VOLUME_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+    "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+    "nineteen": 19, "twenty": 20,
+}
+_VOLUME_RE_WORD = re.compile(
+    r"[\s,:;#.\-]*\b(?:vol\.?|volume|book|bk\.?|tome|part|pt\.?)\s+"
+    r"(one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)"
+    r"\s*$",
+    re.IGNORECASE,
+)
+
 
 def _split_series(title: str) -> tuple[str, int | None]:
     """Split a title into (normalised series key, volume number).
 
     "He Who Fights with Monsters 11" -> ("he who fights with monsters", 11);
     "Last Wish System, Vol. 1-18" -> ("last wish system", 1);
+    "The Code of Survival Book Three" -> ("the code of survival", 3);
     a title with no trailing number -> (normalised title, None) so it stands
     on its own and isn't merged with anything."""
     raw = (title or "").strip()
@@ -1025,7 +1052,66 @@ def _split_series(title: str) -> tuple[str, int | None]:
         base = raw[: m.start()].strip(" ,:;#.-")
         if base:  # guard against a pure-number title like "2001" or "1984"
             return _norm_title(base), int(m.group(1))
+    m = _VOLUME_RE_WORD.search(raw)
+    if m:
+        base = raw[: m.start()].strip(" ,:;#.-")
+        if base:
+            return _norm_title(base), _VOLUME_WORDS[m.group(1).lower()]
     return _norm_title(raw), None
+
+
+# Volume nouns shared across the sequel-detection patterns below.
+_VOL_NOUN = (
+    r"book|novel|installment|instalment|volume|entry|tale|adventure|tome|sequel"
+)
+
+# Three patterns share OR-alternation. Each match means "this description is
+# describing something other than a series entry point":
+#   1. Ordinal + volume noun: "the fourth book", "fourth and final book"
+#   2. Volume noun + word/digit: "Book Three of", "book 4 of"
+#   3. Endpoint marker + volume noun: "the last book in the series",
+#      "the final installment", "the concluding novel"
+# Up to 3 filler words allowed between the modifier and the noun so phrases
+# like "fourth and final book" still match.
+_DESC_SEQUEL_RE = re.compile(
+    r"\b(?:"
+    r"(?:the\s+)?(?:second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|"
+    r"eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|"
+    r"nineteenth|twentieth)"
+    rf"(?:\s+[a-z]+){{0,3}}\s+(?:{_VOL_NOUN})"
+    r"|"
+    r"(?:book|volume|vol\.?|installment|instalment|entry|tome)\s+"
+    r"(?:two|three|four|five|six|seven|eight|nine|ten|"
+    r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|"
+    r"[2-9]|1[0-9]|20)"
+    r"|"
+    r"(?:the\s+)?(?:last|final|concluding|closing)"
+    rf"(?:\s+[a-z]+){{0,3}}\s+(?:{_VOL_NOUN})"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _desc_is_sequel(description: str) -> bool:
+    """True when the description names this book as anything but a series
+    entry point — ordinal position ("the fourth book"), explicit volume
+    ("Book Three of"), or an endpoint marker ("the last book", "the final
+    installment", "the concluding novel").
+
+    For books whose title carries no volume marker (e.g. Adams' "So Long, and
+    Thanks for All the Fish", or Erin Hunter's "A Dangerous Path") we can't
+    recover the series' entry point from the candidate alone — the series
+    name isn't reliably extractable from prose. Dropping the candidate is
+    still better than recommending a stranger to start mid-series.
+
+    False positives are guarded by requiring a book/novel/volume/installment-
+    type noun ("the fourth chapter" / "the final goodbye" / "the fourth time
+    he met her" don't match) and by intentionally omitting "first" / "1"
+    (those describe entry points, which is what we want to keep).
+    """
+    if not description:
+        return False
+    return _DESC_SEQUEL_RE.search(description) is not None
 
 
 def _entry_point_book(book: Books, lib_langs: set[str], saved_titles: set[str]) -> Books:
@@ -1232,6 +1318,23 @@ def library_recommend(
     # that arrived tagless can still be scored on genre, not text alone.
     _enrich_tagless_candidates(candidates, saved)
 
+    # --- 4a) Drop sequels whose volume position is only in the description ---
+    # E.g. Adams' "So long, and thanks for all the fish" — the title gives no
+    # hint, but the description says "the fourth book in the Hitchhiker's
+    # Trilogy". Title-driven series collapsing can't recover book 1 for these
+    # (we don't have the series name), so dropping them is better than
+    # recommending a stranger to start mid-series. Sequels whose title DOES
+    # carry a volume marker still flow through the normal collapse + swap.
+    def _is_text_only_sequel(c: Books) -> bool:
+        if _split_series(c.title)[1] is not None:
+            return False  # title already declares volume — collapse logic handles it
+        return _desc_is_sequel(c.description)
+
+    candidates = [c for c in candidates if not _is_text_only_sequel(c)]
+
+    if not candidates:
+        return []
+
     # --- 5) Combined scoring: description match + genre match ---
     # description_score (IDF-weighted token-set F1 over title + description) is
     # always available; genre_score only when the book has tags. We blend the
@@ -1357,13 +1460,196 @@ def library_recommend(
     return result
 
 
+# Words that mark a tag as a series name rather than a genre — "Hitchhiker's
+# Trilogy", "Cosmere Saga", etc. A tag containing any of these gets ranked
+# below tags that look like real genres, so it doesn't get picked as the
+# display category for grouping.
+_SERIES_HINT_WORDS = {
+    "trilogy", "saga", "series", "cycle", "chronicles", "sequence",
+    "tetralogy", "quintet", "duology",
+}
+
+# Broad genre-keyword vocabulary used to rank "is this tag genre-ish?". Not
+# the source of truth for recommender scoring — just a tiebreaker for display.
+_GENRE_VOCAB = {
+    "fiction", "nonfiction", "fantasy", "romance", "thriller", "mystery",
+    "horror", "litrpg", "gamelit", "dystopian", "paranormal", "steampunk",
+    "cyberpunk", "superhero", "supernatural", "noir", "western", "adventure",
+    "sci", "scifi", "science", "historical", "young", "adult", "memoir",
+    "biography", "autobiography", "cookbook", "philosophy", "religion",
+    "psychology", "sociology", "economics", "history", "poetry", "drama",
+    "comedy", "humor", "satire", "crime", "spy", "espionage", "war",
+    "military", "epic", "urban", "magical", "vampire", "zombie",
+    "apocalyptic", "xianxia", "wuxia", "isekai", "litfic", "literary",
+}
+
+# Vague catch-all tags that technically pass the genre vocab check but make
+# terrible display categories ("Fiction", "Literature" alone are uninformative).
+_GENERIC_DISPLAY_TAGS = {"fiction", "nonfiction", "non-fiction", "general", "literature"}
+
+# Description / title scan for a fallback genre when a book has no usable
+# tags. Ordered most-specific first so "Sci-fi LitRPG" lands on "LitRPG" not
+# "Science Fiction". Word boundaries enforced at match time.
+_DERIVED_GENRES = [
+    # Specific subgenres — checked first so "Sci-fi LitRPG" lands on LitRPG
+    # instead of Science Fiction.
+    ("LitRPG", ["litrpg", "lit-rpg", "lit rpg"]),
+    ("GameLit", ["gamelit", "game lit"]),
+    ("Xianxia", ["xianxia"]),
+    ("Wuxia", ["wuxia"]),
+    ("Isekai", ["isekai"]),
+    ("Cyberpunk", ["cyberpunk"]),
+    ("Steampunk", ["steampunk"]),
+    ("Space Opera", ["space opera"]),
+    ("Urban Fantasy", ["urban fantasy"]),
+    ("Dark Fantasy", ["dark fantasy"]),
+    ("Epic Fantasy", ["epic fantasy"]),
+    ("High Fantasy", ["high fantasy"]),
+    ("Sword and Sorcery", ["sword and sorcery", "sword & sorcery"]),
+    ("Historical Fiction", ["historical fiction"]),
+    ("Paranormal Romance", ["paranormal romance"]),
+    ("Romantasy", ["romantasy"]),
+    ("Cozy Mystery", ["cozy mystery"]),
+    ("Police Procedural", ["police procedural"]),
+    ("Hardboiled", ["hardboiled", "hard-boiled"]),
+    ("Coming of Age", ["coming-of-age", "coming of age"]),
+    ("Magical Realism", ["magical realism"]),
+    ("Graphic Novel", ["graphic novel"]),
+    ("Picture Book", ["picture book"]),
+    ("Middle Grade", ["middle grade", "middle-grade"]),
+    ("Young Adult", ["young adult"]),
+    ("Children's Fiction", ["children's fiction", "children's novel", "children's book"]),
+    ("Manga", ["manga"]),
+    ("Light Novel", ["light novel"]),
+    ("Animal Fiction", ["warrior cats", "talking cats", "anthropomorphic animals", "anthropomorphic"]),
+    # Mid-specificity standalone genres.
+    ("Dystopian", ["dystopian", "dystopia"]),
+    ("Paranormal", ["paranormal"]),
+    ("Superhero", ["superhero", "super-hero"]),
+    ("Post-Apocalyptic", ["post-apocalyptic", "post apocalyptic", "postapocalyptic"]),
+    ("Christian Fiction", ["christian fiction", "christian novel"]),
+    # Broad fiction categories — last because they're easy to false-positive
+    # against specific subgenres above.
+    ("Science Fiction", ["science fiction", "sci-fi", "sci fi", "scifi"]),
+    ("Fantasy", ["fantasy"]),
+    ("Thriller", ["thriller", "psychological thriller"]),
+    ("Mystery", ["mystery", "whodunit"]),
+    ("Horror", ["horror"]),
+    ("Romance", ["romance"]),
+    ("Western", ["western novel", "old west"]),
+    ("Action", ["action novel", "action-packed", "action adventure"]),
+    ("Adventure", ["adventure novel", "adventure story", "epic adventure"]),
+    ("Crime", ["crime novel", "crime fiction"]),
+    ("War", ["war novel", "war fiction"]),
+    # Nonfiction.
+    ("Memoir", ["memoir"]),
+    ("Biography", ["autobiography", "biography"]),
+    ("Cookbook", ["cookbook"]),
+    ("Self-Help", ["self-help", "self help"]),
+    ("True Crime", ["true crime"]),
+    ("Travel", ["travel guide", "travel memoir"]),
+    ("History", ["history of "]),
+    ("Essays", ["essays on", "collection of essays"]),
+]
+
+
+def _tag_display_score(tag: str) -> int:
+    """Higher = better candidate for the grouping category.
+
+    -1: looks like a series name ("Trilogy of Four")
+     0: neutral / unrecognised
+     1: too-generic genre word ("Fiction" on its own)
+     3: specific genre tag ("Science Fiction", "LitRPG", "fantasy fiction")
+    """
+    lower = tag.lower().strip()
+    if not lower:
+        return -1
+    words = set(re.findall(r"[a-z]+", lower))
+    if words & _SERIES_HINT_WORDS:
+        return -1
+    if lower in _GENERIC_DISPLAY_TAGS:
+        return 1
+    if words & _GENRE_VOCAB:
+        return 3
+    return 0
+
+
+def _derive_genre_from_text(text: str) -> str | None:
+    """Pull a display genre out of free text — title + description.
+
+    Used when a book arrives with no usable tags (Google Books occasionally
+    omits categories entirely; Open Library often does for new releases).
+    Returns None if nothing distinctive matched, in which case the caller
+    falls back to 'Uncategorized'.
+    """
+    if not text:
+        return None
+    haystack = text.lower()
+    for label, patterns in _DERIVED_GENRES:
+        for pat in patterns:
+            if re.search(r"\b" + re.escape(pat) + r"\b", haystack):
+                return label
+    return None
+
+
+def _clean_tags_for_display(tags: list[str], description: str, title: str) -> list[str]:
+    """Reshape tags for the response: strip facet noise, rank genres first,
+    derive a fallback from text when nothing usable survives.
+
+    - "series:Dungeon Crawler Carl" → dropped (display-only — _genre_atoms
+      still sees the raw tag internally for scoring elsewhere).
+    - "genre:LitRPG" → "LitRPG"
+    - ["Trilogy of Four", "Science Fiction"] → ["Science Fiction", "Trilogy of Four"]
+      so the frontend's `tags[0]` grouping picks the real genre.
+    - A book with no tags but a description mentioning "Sci-fi LitRPG" →
+      ["LitRPG"], so it doesn't end up under "Uncategorized".
+    """
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for tag in tags or []:
+        atom = (tag or "").strip()
+        if not atom:
+            continue
+        m = _FACET_RE.match(atom)
+        if m:
+            prefix = m.group(1).lower()
+            if prefix in _FACET_DROP:
+                continue  # series:/person:/etc — display noise
+            if prefix in _FACET_KEEP:
+                atom = m.group(2).strip()
+                if not atom:
+                    continue
+        key = atom.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(atom)
+
+    # Stable-sort by score so genre tags come first without otherwise
+    # disturbing OL/GB's own ordering among equally-scored tags.
+    cleaned.sort(key=lambda t: -_tag_display_score(t))
+
+    # Still nothing display-worthy? Scan title + description for a known
+    # genre keyword. Even a tag-less Google Books result usually mentions
+    # the genre in its description.
+    if not cleaned or _tag_display_score(cleaned[0]) <= 0:
+        derived = _derive_genre_from_text(f"{title} {description}")
+        if derived:
+            # Prepend so the frontend's first-tag grouping uses it; keep any
+            # other tags around so they still render as chips.
+            if derived.lower() not in seen:
+                cleaned.insert(0, derived)
+
+    return cleaned
+
+
 def _to_out(b, relevance: float | None = None) -> dict:
     out = {
         "id": b.id,
         "title": b.title,
         "authors": b.authors,
         "description": b.description,
-        "tags": b.tags,
+        "tags": _clean_tags_for_display(b.tags, b.description, b.title),
         "metadata": b.metadata,
     }
     if relevance is not None:

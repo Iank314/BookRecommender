@@ -263,7 +263,7 @@ function renderLibrary(books, label) {
   // View switcher: Saved / Liked / Disliked. Clicking refetches the chosen
   // section. Active state is purely visual; libraryView is the source of truth.
   const tabs = document.createElement("div");
-  tabs.className = "library-tabs";
+  tabs.className = "library-views";
   const switcherSpec = [
     { key: "saved", label: "Saved" },
     { key: "liked", label: "Liked" },
@@ -271,7 +271,7 @@ function renderLibrary(books, label) {
   ];
   for (const { key, label: tabLabel } of switcherSpec) {
     const btn = document.createElement("button");
-    btn.className = "library-tab" + (libraryView === key ? " active" : "");
+    btn.className = "library-view" + (libraryView === key ? " active" : "");
     btn.textContent = tabLabel;
     btn.addEventListener("click", () => {
       if (libraryView === key) return;
@@ -458,7 +458,7 @@ function renderSimilarResults(books, sourceTitle) {
 function renderBookList(books, startRank, options = {}) {
   const grouped = {};
   books.forEach((book, i) => {
-    const genre = book.tags.length > 0 ? book.tags[0] : "Uncategorized";
+    const genre = book.tags.length > 0 ? book.tags[0] : "Other";
     if (!grouped[genre]) grouped[genre] = [];
     grouped[genre].push({ ...book, rank: startRank + i + 1 });
   });

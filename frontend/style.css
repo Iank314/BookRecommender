@@ -416,36 +416,49 @@ main {
   padding: 2rem 0;
 }
 
-/* Saved / Liked / Disliked view switcher */
-.library-tabs {
+/* Saved / Liked / Disliked view switcher — a single segmented control
+   that uses the same green accent as the top-level "My Library" tab, so
+   the library section reads as one cohesive unit. */
+.library-views {
   display: flex;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
+  margin: 0 0 1.5rem;
+  border: 1px solid #3a5c3a;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #1a2e1a;
 }
 
-.library-tab {
+.library-view {
   flex: 1;
-  padding: 0.55rem 0.8rem;
-  font-size: 0.88rem;
+  padding: 0.7rem 1rem;
+  font-size: 0.9rem;
   font-weight: 600;
-  border: 1px solid #333;
-  border-radius: 6px;
+  border: none;
+  border-right: 1px solid #2a4a2a;
   background: transparent;
-  color: #888;
+  color: #6fcf6f;
   cursor: pointer;
-  transition: background 0.2s, color 0.2s, border-color 0.2s;
+  transition: background 0.18s, color 0.18s;
 }
 
-.library-tab:hover {
-  background: #1a1a1a;
-  color: #ccc;
+.library-view:last-child {
+  border-right: none;
 }
 
-.library-tab.active {
-  background: #2a2f4a;
-  border-color: #5c6bc0;
+.library-view:hover {
+  background: #223d22;
+  color: #a1e0a1;
+}
+
+.library-view.active {
+  background: #2a5c2a;
   color: #fff;
   cursor: default;
+}
+
+.library-view.active:hover {
+  background: #2a5c2a;
+  color: #fff;
 }
 
 /* Thumbs up / thumbs down */
