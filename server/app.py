@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import logging
+import os
 import re
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -15,15 +16,25 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, constr
 
+from server.auth_throttle import LoginThrottle
+from server.cache.rec_cache import RecommendationCache
 from server.fetcher.fetcher import Fetcher, GOOGLE_ENDPOINT, OPENLIB_ENDPOINT
 from server.models.book import Books
 from server.recommender.recommendation_engine import RecommendationEngine
 from server.recommender.recommender import Recommender
+from server.storage.feedback_db import FeedbackKind, FeedbackStore
 from server.storage.library_db import LibraryStore
 from server.storage.users_db import UserStore, UsernameTakenError
 
 SESSION_COOKIE = "bookrec_session"
 COOKIE_MAX_AGE = 60 * 60 * 24 * 365  # 1 year
+# Set BOOKREC_SECURE_COOKIES=true in production (Fly/any HTTPS host) so the
+# session cookie is only sent over HTTPS. Off by default so local HTTP dev
+# keeps working; auto-detection isn't reliable behind reverse proxies that
+# terminate TLS at the edge.
+SESSION_COOKIE_SECURE = os.environ.get("BOOKREC_SECURE_COOKIES", "").lower() in (
+    "1", "true", "yes", "on",
+)
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 logger = logging.getLogger(__name__)
@@ -416,13 +427,8 @@ def find_similar(req: SimilarRequest):
     if not all_books:
         return []
 
-    # --- 3) Score candidates via token-set F1 over title + tags + description ---
-    # TF-IDF cosine was unreliable here: source and candidate often come from
-    # different sources (Google Books vs Open Library) with different tag
-    # vocabularies and wildly different description lengths, so the cosine
-    # collapsed near zero. Token-set F1 (recall × precision) is more
-    # interpretable: it asks how much of each book's vocabulary the other
-    # captures, regardless of doc length.
+    # --- 3) Build the source book; keep only candidates in its language ---
+    # An English source shouldn't surface Russian editions of the same trope.
     source_book = Books(
         id="__source__",
         title=req.title,
@@ -431,6 +437,19 @@ def find_similar(req: SimilarRequest):
         tags=req.tags,
         metadata={},
     )
+    src_lang = _book_language(source_book)
+    if src_lang and src_lang != "non-latin":
+        all_books = [b for b in all_books if _book_language(b) == src_lang]
+        if not all_books:
+            return []
+
+    # --- 4) Score candidates via token-set F1 over title + tags + description ---
+    # TF-IDF cosine was unreliable here: source and candidate often come from
+    # different sources (Google Books vs Open Library) with different tag
+    # vocabularies and wildly different description lengths, so the cosine
+    # collapsed near zero. Token-set F1 (recall × precision) is more
+    # interpretable: it asks how much of each book's vocabulary the other
+    # captures, regardless of doc length.
     src_tokens = _book_tokens(source_book)
     if not src_tokens:
         return []
@@ -455,7 +474,38 @@ def find_similar(req: SimilarRequest):
         scored.append((cand, final))
 
     scored.sort(key=lambda x: x[1], reverse=True)
-    top = scored[: req.top_n]
+
+    # --- 5) Collapse each series to its earliest-volume entry ---
+    # If several volumes of one series rank, keep only the earliest present —
+    # the series holds the rank of its best-scoring volume but is displayed
+    # as the earliest volume seen, so we don't recommend "book 11".
+    series_rep: dict[str, tuple[Books, float, int]] = {}  # key -> (book, score, volume)
+    order: list[str] = []  # series keys in best-score-first order
+    for cand, score in scored:
+        skey, vol = _split_series(cand.title)
+        v = vol if vol is not None else 1
+        if skey not in series_rep:
+            order.append(skey)
+            series_rep[skey] = (cand, score, v)
+        elif v < series_rep[skey][2]:
+            series_rep[skey] = (cand, score, v)
+
+    top = [(series_rep[k][0], series_rep[k][1]) for k in order][: req.top_n]
+
+    # --- 6) Swap any later-volume entry for its book 1 ---
+    # Recommend the series' entry point, not "book 11". Only later-volume
+    # titles trigger a lookup, and they run concurrently, so the cost is small.
+    src_titles = {_norm_title(req.title)}
+    src_langs = {src_lang} if src_lang and src_lang != "non-latin" else set()
+
+    def _resolve(entry: tuple[Books, float]) -> tuple[Books, float]:
+        book, score = entry
+        return _entry_point_book(book, src_langs, src_titles), score
+
+    if top:
+        with ThreadPoolExecutor(max_workers=min(8, len(top))) as ex:
+            top = list(ex.map(_resolve, top))
+
     return [_to_out(book, relevance=round(sim * 100, 1)) for book, sim in top]
 
 
@@ -584,6 +634,9 @@ def _dedup_key_raw(title: str, author: str) -> str:
 # ------------------------------------------------------------------ #
 user_store = UserStore()
 library_store = LibraryStore()
+feedback_store = FeedbackStore()
+rec_cache = RecommendationCache()
+login_throttle = LoginThrottle()
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
@@ -592,6 +645,19 @@ def _set_session_cookie(response: Response, token: str) -> None:
         value=token,
         max_age=COOKIE_MAX_AGE,
         httponly=True,
+        secure=SESSION_COOKIE_SECURE,
+        samesite="lax",
+    )
+
+
+def _clear_session_cookie(response: Response) -> None:
+    # The browser only deletes a cookie when the delete request mirrors the
+    # attributes it was set with — secure/samesite in particular — otherwise
+    # it's treated as a different cookie and the original lingers.
+    response.delete_cookie(
+        key=SESSION_COOKIE,
+        httponly=True,
+        secure=SESSION_COOKIE_SECURE,
         samesite="lax",
     )
 
@@ -628,9 +694,16 @@ def auth_register(req: AuthRequest, response: Response):
 
 @app.post("/auth/login", response_model=AuthResponse, summary="Log in")
 def auth_login(req: AuthRequest, response: Response):
+    if not login_throttle.is_allowed(req.username):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed login attempts. Try again in a minute.",
+        )
     user_id = user_store.verify_credentials(req.username, req.password)
     if not user_id:
+        login_throttle.record_failure(req.username)
         raise HTTPException(status_code=401, detail="Invalid username or password.")
+    login_throttle.clear(req.username)
     _set_session_cookie(response, user_store.create_session(user_id))
     return AuthResponse(username=user_store.get_username(user_id) or req.username)
 
@@ -642,7 +715,7 @@ def auth_logout(
 ):
     if bookrec_session:
         user_store.delete_session(bookrec_session)
-    response.delete_cookie(SESSION_COOKIE)
+    _clear_session_cookie(response)
     return {"status": "ok"}
 
 
@@ -676,6 +749,7 @@ def library_add(req: SaveBookRequest, user_id: str = Depends(get_current_user_id
     # time, so recommendations don't have to re-fetch the same book later.
     _ensure_details(book)
     library_store.add(user_id, book)
+    rec_cache.invalidate(user_id)
     return _to_out(book)
 
 
@@ -683,12 +757,71 @@ def library_add(req: SaveBookRequest, user_id: str = Depends(get_current_user_id
 def library_remove(book_id: str, user_id: str = Depends(get_current_user_id)):
     if not library_store.remove(user_id, book_id):
         raise HTTPException(status_code=404, detail="Book not in library.")
+    rec_cache.invalidate(user_id)
     return {"status": "ok"}
 
 
 @app.get("/library", response_model=list[BookOut], summary="List your saved books")
 def library_list(user_id: str = Depends(get_current_user_id)):
     return [_to_out(b) for b in library_store.all(user_id)]
+
+
+# ------------------------------------------------------------------ #
+# Feedback — thumbs up / thumbs down signals for the recommender
+# ------------------------------------------------------------------ #
+class FeedbackRequest(BaseModel):
+    id: str
+    title: str
+    kind: FeedbackKind
+    authors: list[str] = Field(default_factory=list)
+    description: str = ""
+    tags: list[str] = Field(default_factory=list)
+    metadata: dict = Field(default_factory=dict)
+
+
+class FeedbackOut(BookOut):
+    kind: FeedbackKind
+
+
+@app.post("/library/feedback", response_model=FeedbackOut,
+          summary="Record thumbs up / down on a book")
+def feedback_set(req: FeedbackRequest, user_id: str = Depends(get_current_user_id)):
+    book = Books(
+        id=req.id, title=req.title, authors=req.authors,
+        description=req.description, tags=req.tags, metadata=req.metadata,
+    )
+    # Back-fill genres/description/language at feedback time too, so the
+    # recommender's similarity signal has real tokens to work with — a sparse
+    # OL record would otherwise drag down or boost based on almost nothing.
+    _ensure_details(book)
+    feedback_store.set(user_id, book, req.kind)
+    rec_cache.invalidate(user_id)
+    out = _to_out(book)
+    out["kind"] = req.kind
+    return out
+
+
+@app.delete("/library/feedback/{book_id}", summary="Clear feedback on a book")
+def feedback_remove(book_id: str, user_id: str = Depends(get_current_user_id)):
+    if not feedback_store.remove(user_id, book_id):
+        raise HTTPException(status_code=404, detail="No feedback recorded for that book.")
+    rec_cache.invalidate(user_id)
+    return {"status": "ok"}
+
+
+@app.get("/library/feedback", response_model=list[FeedbackOut],
+         summary="List your thumbs-up/down books")
+def feedback_list(
+    kind: FeedbackKind | None = Query(default=None),
+    user_id: str = Depends(get_current_user_id),
+):
+    rows = feedback_store.all(user_id, kind=kind)
+    out: list[dict] = []
+    for book, k in rows:
+        item = _to_out(book)
+        item["kind"] = k
+        out.append(item)
+    return out
 
 
 # Open Library facet prefixes. "genre:"/"subject:" carry a usable genre once the
@@ -1035,6 +1168,23 @@ def library_recommend(
     if not saved:
         raise HTTPException(status_code=400, detail="Your library is empty. Save some books first.")
 
+    # --- Fetch feedback (used by both the cache key and the scoring loop) ---
+    feedback_pairs = feedback_store.all(user_id)
+    liked_books = [b for b, k in feedback_pairs if k == "up"]
+    disliked_books = [b for b, k in feedback_pairs if k == "down"]
+
+    # --- Cache lookup: signature spans saved + liked + disliked so any
+    # change (add, remove, flip a thumbs-up to thumbs-down) naturally
+    # produces a fresh key. Hits skip the whole fetch/score/enrich pipeline.
+    sig = RecommendationCache.signature(
+        saved=(b.id for b in saved),
+        liked=(b.id for b in liked_books),
+        disliked=(b.id for b in disliked_books),
+    )
+    cached = rec_cache.get(user_id, sig, top_n)
+    if cached is not None:
+        return cached
+
     # --- 0) Back-fill missing language/genres/descriptions on saved books ---
     # Books added before enrichment existed (or that were saved sparse) get
     # filled in once and persisted, so future runs are fast and the genre +
@@ -1048,11 +1198,16 @@ def library_recommend(
     # --- 1) Build the library's genre profile + search queries ---
     profile_specific, genre_queries = _library_genre_profile(saved)
 
-    # --- 2) Fetch candidates (queries run concurrently), skipping saved books ---
+    # --- 2) Fetch candidates (queries run concurrently), skipping saved + disliked ---
     # The genre queries are fetched in parallel: Open Library searches are slow,
     # so issuing 8 of them sequentially dominated request time.
+    # Disliked books share the same exclusion path as saved ones — by dedup
+    # key and by normalised title — so they can't slip back in via a different
+    # edition / source.
     seen_keys = {_dedup_key(b) for b in saved}
+    seen_keys.update(_dedup_key(b) for b in disliked_books)
     saved_titles = {_norm_title(b.title) for b in saved}
+    saved_titles.update(_norm_title(b.title) for b in disliked_books)
     candidates: list[Books] = []
     with ThreadPoolExecutor(max_workers=min(8, len(genre_queries))) as ex:
         fetched = list(ex.map(_fetch_genre_candidates, genre_queries))
@@ -1096,6 +1251,16 @@ def library_recommend(
     # words like "magic" or "combat".
     drop_nonfiction = _library_is_fiction(saved)
 
+    # Feedback signals: a thumbs-up nudges similar candidates up, a thumbs-down
+    # nudges similar ones down. Same IDF-weighted F1 we already trust for
+    # description scoring, against the best-matching liked / disliked book.
+    # Modifier is multiplicative on `combined` and clamped so a single signal
+    # can't completely override the underlying genre/description match.
+    liked_text = [t for t in (_text_tokens(b) for b in liked_books) if t]
+    disliked_text = [t for t in (_text_tokens(b) for b in disliked_books) if t]
+    FB_ALPHA, FB_BETA = 0.5, 0.5
+    FB_MOD_LO, FB_MOD_HI = 0.1, 1.5
+
     # (candidate, displayed_score, ranking_score, best-matching saved-book index)
     scored: list[tuple[Books, float, float, int]] = []
     for cand in candidates:
@@ -1116,6 +1281,17 @@ def library_recommend(
             combined = W_GENRE * _genre_score(cand_genres, profile_specific) + W_DESC * desc_score
         else:
             combined = desc_score
+        if liked_text or disliked_text:
+            up_sim = max(
+                (_idf_weighted_f1(t, cand_text, idf, default_idf) for t in liked_text),
+                default=0.0,
+            )
+            down_sim = max(
+                (_idf_weighted_f1(t, cand_text, idf, default_idf) for t in disliked_text),
+                default=0.0,
+            )
+            fb_mod = max(FB_MOD_LO, min(FB_MOD_HI, 1.0 + FB_ALPHA * up_sim - FB_BETA * down_sim))
+            combined *= fb_mod
         pop = _book_popularity(cand)
         final = combined * (1.0 + 0.05 * pop)
         scored.append((cand, combined, final, best_idx))
@@ -1176,7 +1352,9 @@ def library_recommend(
         with ThreadPoolExecutor(max_workers=min(8, len(chosen))) as ex:
             chosen = list(ex.map(_resolve, chosen))
 
-    return [_to_out(book, relevance=round(score * 100, 1)) for book, score in chosen]
+    result = [_to_out(book, relevance=round(score * 100, 1)) for book, score in chosen]
+    rec_cache.put(user_id, sig, top_n, result)
+    return result
 
 
 def _to_out(b, relevance: float | None = None) -> dict:

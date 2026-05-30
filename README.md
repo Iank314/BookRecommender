@@ -9,11 +9,8 @@
 
 **Robustness & polish**
 - **Verify Google Books end-to-end with an API key** — confirm Google actually contributes results (unauthenticated testing keeps hitting the rate limit and falling back to Open Library)
-- **Cache recommendation results per library signature** — return instantly for an unchanged library without re-scoring
-- **Extend series collapsing + language filter to `/similar`** — those currently live only in `/library/recommend`, so "Find Similar" can still surface book 11 or a foreign edition
 
 **Product**
-- **Docker containerization** — package the app for easy deployment and consistent environments
 - **Reading status** — want-to-read / reading / read on library books, and recommend from only the "read" ones
 - **Account management** — password reset and email verification (currently username + password only)
 
@@ -49,12 +46,13 @@ A full-stack book recommendation system that searches **Google Books** and **Ope
 - **Similar books**: given a book, fetches candidates matching its genres and ranks them by IDF-weighted token-set similarity (plain cosine collapsed across the differing vocabularies of Google Books and Open Library)
 - **Library-based recommendations**: fetches candidates across your library's genres and scores each one against your closest saved book by blending a **genre-overlap score** with a **description-similarity score** — falling back to description-only when a candidate has no genre tags
 - **Open Library enrichment**: candidates that arrive without genres have their subjects and full description back-filled from Open Library's work-detail endpoint, so they can be judged on genre, not text alone
-- **Language matching**: recommendations are limited to the languages present in your library (language detected from each book's title script) — an all-English library won't surface Russian, Japanese, Korean, or Chinese editions
+- **Language matching**: recommendations are limited to the language(s) of the source — your library's languages for library recs, the clicked book's language for "Find Similar" (detected from each book's title script) — so an all-English request won't surface Russian, Japanese, Korean, or Chinese editions
 - **Fiction/nonfiction filter**: when your library is fiction, nonfiction candidates (how-tos, histories, biographies) are dropped so they can't match on shared theme words like "magic" or "combat"
-- **Series collapsing**: all volumes of a series fold into one recommendation, shown as its entry point — if only "book 11" ranked, the series is looked up by title and book 1 is swapped in
+- **Series collapsing**: across both library recs and "Find Similar", all volumes of a series fold into one recommendation, shown as its entry point — if only "book 11" ranked, the series is looked up by title and book 1 is swapped in
 - **Diversity**: caps how many recommendations come from any single saved book and any single author, so one genre or author can't flood the list
 - **Popularity as tiebreaker only**: popularity scales a match's score by at most a few percent, so a hugely popular off-genre book can't outrank a genuine match
 - **Detail caching**: a book's genres, description, and language are captured when you save it (sparse Open Library entries are enriched), so recommendations don't re-fetch the same data later
+- **Recommendation caching**: results for an unchanged library are kept in an in-process LRU cache keyed by a hash of the saved book IDs, so repeat calls return instantly without re-fetching or re-scoring; adding or removing a book invalidates the user's cached entries
 
 ### Accounts & Personal Library
 - Register / log in with a username and password (passwords stored salted + PBKDF2-hashed)
@@ -62,6 +60,8 @@ A full-stack book recommendation system that searches **Google Books** and **Ope
 - Search and "Find Similar" are open to everyone; saving and library recommendations require logging in
 - Save and remove books (genres, description, and language are captured on save); view your collection in a dedicated tab
 - Get recommendations based on your full saved collection
+- Failed logins are throttled per-username (5 attempts / 60s window) to blunt credential-stuffing attempts
+- Session cookies are `HttpOnly`, `SameSite=Lax`, and `Secure` in production (toggle with `BOOKREC_SECURE_COOKIES=true` when serving over HTTPS)
 
 ### Frontend
 - Dark-themed single-page app with category tabs (Title / Author / Genre / My Library)
@@ -126,12 +126,15 @@ BookRecommender/
 │   └── style.css           Dark theme, responsive layout
 ├── server/
 │   ├── app.py              FastAPI REST API (auth, search, similar, library)
+│   ├── auth_throttle.py    Per-username failed-login throttle
 │   ├── models/
 │   │   ├── book.py         Book dataclass
 │   │   └── library.py      In-memory collection used inside the recommender pipeline
 │   ├── storage/
 │   │   ├── library_db.py   SQLite per-user saved-library store
 │   │   └── users_db.py     SQLite accounts + login sessions (PBKDF2 hashing)
+│   ├── cache/
+│   │   └── rec_cache.py    In-process LRU cache for library recommendations
 │   ├── fetcher/
 │   │   └── fetcher.py      Google Books + Open Library adapters (search + work-detail enrichment)
 │   ├── preprocessing/
@@ -146,8 +149,10 @@ BookRecommender/
 ├── scripts/
 │   └── demo_query.py       CLI demo
 ├── tests/
+│   ├── test_auth_throttle.py
 │   ├── test_engine.py
 │   ├── test_pipeline.py
+│   ├── test_rec_cache.py
 │   └── test_recommender_edge.py
 ├── requirements.txt
 └── README.md
@@ -196,6 +201,39 @@ On first run the server creates a SQLite database at `data/library.db` for accou
 export GOOGLE_BOOKS_API_KEY=your_key_here
 # PowerShell
 $env:GOOGLE_BOOKS_API_KEY = "your_key_here"
+```
+
+**Production — `BOOKREC_SECURE_COOKIES`.** When deploying behind HTTPS (e.g. on Fly.io), set `BOOKREC_SECURE_COOKIES=true` so the session cookie is only sent over HTTPS. Leave it unset for local HTTP development — otherwise the browser refuses to send the cookie back and login appears to silently fail.
+
+### Run with Docker
+
+The included `Dockerfile` and `docker-compose.yml` build a self-contained image and persist the SQLite DB on the host via a bind-mounted `./data` volume, so accounts and saved libraries survive container restarts and rebuilds.
+
+```bash
+# One-shot build + run
+docker compose up --build
+
+# Or background it
+docker compose up -d --build
+
+# Stop
+docker compose down
+```
+
+Open http://localhost:8000. To pass through a Google Books API key, set it on the host before bringing the stack up:
+
+```bash
+# bash
+export GOOGLE_BOOKS_API_KEY=your_key_here && docker compose up
+# PowerShell
+$env:GOOGLE_BOOKS_API_KEY = "your_key_here"; docker compose up
+```
+
+Without Compose:
+
+```bash
+docker build -t bookrecommender .
+docker run --rm -p 8000:8000 -v "$(pwd)/data:/app/data" bookrecommender
 ```
 
 ### CLI Demo
