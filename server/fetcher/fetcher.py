@@ -307,8 +307,16 @@ class Fetcher:
                 parts.append(f"By {', '.join(authors[:3])}.")
             raw = " | ".join(parts) if parts else ""
 
+        # OL's `language` field lists EVERY edition language, roughly
+        # alphabetically — for a much-translated book languages[0] is junk
+        # ("ben" for Harry Potter). The search result's title/description are
+        # English-leaning, so prefer eng when present; a single-language book
+        # is unaffected.
         languages = doc.get("language", []) or []
-        language = languages[0] if isinstance(languages, list) and languages else None
+        if isinstance(languages, list) and languages:
+            language = "eng" if "eng" in languages else languages[0]
+        else:
+            language = None
 
         # Open Library covers are addressed by the numeric cover_i id.
         cover_id = doc.get("cover_i")

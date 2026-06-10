@@ -1392,7 +1392,11 @@ def _library_is_fiction(saved: list[Books]) -> bool:
 _LANG_ALIASES = {
     "eng": "en", "rus": "ru", "fre": "fr", "fra": "fr", "ger": "de", "deu": "de",
     "spa": "es", "ita": "it", "por": "pt", "jpn": "ja", "chi": "zh", "zho": "zh",
-    "kor": "ko", "dut": "nl", "nld": "nl",
+    "kor": "ko", "dut": "nl", "nld": "nl", "cze": "cs", "ces": "cs", "pol": "pl",
+    "swe": "sv", "dan": "da", "fin": "fi", "nor": "no", "hun": "hu", "ukr": "uk",
+    "tur": "tr", "ben": "bn", "est": "et", "ara": "ar", "heb": "he", "hin": "hi",
+    "vie": "vi", "ind": "id", "tha": "th", "gre": "el", "ell": "el", "ron": "ro",
+    "rum": "ro", "bul": "bg", "slo": "sk", "slk": "sk", "lit": "lt", "lav": "lv",
 }
 
 
@@ -1440,6 +1444,20 @@ def _book_language(book: Books) -> str | None:
 
 def _languages_in_library(saved: list[Books]) -> set[str]:
     return {lang for b in saved if (lang := _book_language(b))}
+
+
+def _apply_language_gate(candidates: list[Books], lib_langs: set[str]) -> list[Books]:
+    """Keep candidates in the library's languages — unless that annihilates
+    the pool, in which case the *stored language metadata* is what's wrong,
+    not the candidates. (Open Library used to hand us a random translation
+    language — 'ben' for Harry Potter — and one bad saved book then filtered
+    every English candidate out, returning zero recommendations.)"""
+    if not lib_langs:
+        return candidates
+    filtered = [c for c in candidates if _book_language(c) in lib_langs]
+    if len(filtered) >= 10 or len(filtered) >= 0.05 * len(candidates):
+        return filtered
+    return candidates
 
 
 def _norm_title(title: str) -> str:
@@ -1806,8 +1824,7 @@ def library_recommend(
 
     # --- 3) Keep only candidates in a language the library uses ---
     # An all-English library shouldn't surface Russian editions of classics.
-    if lib_langs:
-        candidates = [c for c in candidates if _book_language(c) in lib_langs]
+    candidates = _apply_language_gate(candidates, lib_langs)
 
     if not candidates:
         return []
@@ -1955,7 +1972,11 @@ def library_recommend(
             chosen = list(ex.map(_resolve, chosen))
 
     result = [_to_out(book, relevance=round(score * 100, 1)) for book, score in chosen]
-    rec_cache.put(user_id, sig, top_n, result)
+    # Empty results are NOT cached: they're usually a transient provider
+    # failure (or a data bug), and serving cached emptiness until the next
+    # library change would make "no recommendations" sticky.
+    if result:
+        rec_cache.put(user_id, sig, top_n, result)
     return result
 
 
@@ -2017,20 +2038,21 @@ _DERIVED_GENRES = [
     ("Picture Book", ["picture book"]),
     ("Middle Grade", ["middle grade", "middle-grade"]),
     ("Young Adult", ["young adult"]),
-    ("Children's Fiction", ["children's fiction", "children's novel", "children's book"]),
+    ("Children's Fiction", ["children's fiction", "children's novel", "children's book",
+                            "children's books", "juvenile literature", "juvenile fiction"]),
     ("Manga", ["manga"]),
     ("Light Novel", ["light novel"]),
     ("Animal Fiction", ["warrior cats", "talking cats", "anthropomorphic animals", "anthropomorphic"]),
     # Mid-specificity standalone genres.
     ("Dystopian", ["dystopian", "dystopia"]),
-    ("Paranormal", ["paranormal"]),
+    ("Paranormal", ["paranormal", "vampires", "ghosts", "witches", "werewolves"]),
     ("Superhero", ["superhero", "super-hero"]),
     ("Post-Apocalyptic", ["post-apocalyptic", "post apocalyptic", "postapocalyptic"]),
     ("Christian Fiction", ["christian fiction", "christian novel"]),
     # Broad fiction categories — last because they're easy to false-positive
     # against specific subgenres above.
     ("Science Fiction", ["science fiction", "sci-fi", "sci fi", "scifi"]),
-    ("Fantasy", ["fantasy"]),
+    ("Fantasy", ["fantasy", "witchcraft", "wizardry", "sorcery", "wizards"]),
     ("Thriller", ["thriller", "psychological thriller"]),
     ("Mystery", ["mystery", "whodunit"]),
     ("Horror", ["horror"]),
@@ -2052,16 +2074,27 @@ _DERIVED_GENRES = [
 ]
 
 
+# OL subjects that are story ENTITIES, not genres: "Elder Wand (Imaginary
+# object)", "Hermione Granger (Fictitious character)", and bare "the X" names
+# ("the Elder Wand"). Terrible grouping headers — rank them below everything.
+_ENTITY_TAG_RE = re.compile(
+    r"\((imaginary|fictitious|fictional|legendary)\b", re.IGNORECASE,
+)
+
+
 def _tag_display_score(tag: str) -> int:
     """Higher = better candidate for the grouping category.
 
-    -1: looks like a series name ("Trilogy of Four")
+    -1: looks like a series name ("Trilogy of Four") or a story entity
+        ("the Elder Wand", "Dementors (Imaginary creatures)")
      0: neutral / unrecognised
      1: too-generic genre word ("Fiction" on its own)
      3: specific genre tag ("Science Fiction", "LitRPG", "fantasy fiction")
     """
     lower = tag.lower().strip()
     if not lower:
+        return -1
+    if _ENTITY_TAG_RE.search(lower) or lower.startswith("the "):
         return -1
     words = set(re.findall(r"[a-z]+", lower))
     if words & _SERIES_HINT_WORDS:
@@ -2128,11 +2161,14 @@ def _clean_tags_for_display(tags: list[str], description: str, title: str) -> li
     # disturbing OL/GB's own ordering among equally-scored tags.
     cleaned.sort(key=lambda t: -_tag_display_score(t))
 
-    # Still nothing display-worthy? Scan title + description for a known
-    # genre keyword. Even a tag-less Google Books result usually mentions
-    # the genre in its description.
+    # Still nothing display-worthy? Scan title + description + the raw tags
+    # for a known genre keyword — OL entity-ish subjects ("Witches",
+    # "vampires") aren't genre headers themselves but they signal one, and a
+    # tag-less Google Books result usually names the genre in its description.
     if not cleaned or _tag_display_score(cleaned[0]) <= 0:
-        derived = _derive_genre_from_text(f"{title} {description}")
+        derived = _derive_genre_from_text(
+            f"{title} {description} {' '.join(tags or [])}"
+        )
         if derived:
             # Prepend so the frontend's first-tag grouping uses it; keep any
             # other tags around so they still render as chips.

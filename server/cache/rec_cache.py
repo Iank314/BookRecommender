@@ -24,7 +24,9 @@ from typing import Iterable
 # v2: token plural-folding + genre-synonym folding changed scoring output.
 # v3: liked books excluded from recommendation candidates.
 # v4: cover thumbnails added to book metadata.
-CACHE_VERSION = 4
+# v5: entity-tag demotion + tag-aware genre derivation changed display tags;
+#     language-gate resilience changed recommendation output.
+CACHE_VERSION = 5
 
 
 class RecommendationCache:
