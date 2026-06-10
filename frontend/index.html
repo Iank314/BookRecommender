@@ -6,7 +6,7 @@
   <title>Book Recommender</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📚</text></svg>" />
   <!-- ?v= busts browser caches on deploy — bump it whenever app.js/style.css change. -->
-  <link rel="stylesheet" href="/static/style.css?v=10" />
+  <link rel="stylesheet" href="/static/style.css?v=11" />
 </head>
 <body>
   <header>
@@ -85,9 +85,16 @@
         <span id="auth-toggle-text">Don't have an account?</span>
         <button type="button" id="auth-toggle-btn">Sign up</button>
       </p>
+      <p class="auth-forgot">
+        Forgot your username or password?
+        <a href="mailto:kaufmanian49@gmail.com?subject=Book%20Recommender%20account%20help&body=My%20username%20(if%20known)%3A%20">
+          Email us
+        </a>
+        and we'll sort it out.
+      </p>
     </div>
   </div>
 
-  <script src="/static/app.js?v=10"></script>
+  <script src="/static/app.js?v=11"></script>
 </body>
 </html>

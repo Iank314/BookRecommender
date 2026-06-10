@@ -126,6 +126,24 @@ class UserStore:
             ).fetchone()
         return row["username"] if row else None
 
+    def set_password(self, username: str, new_password: str) -> bool:
+        """Reset a user's password (admin CLI path — scripts/reset_password.py).
+        Also revokes every login session for the account, so anyone holding a
+        stolen session is logged out when the legitimate owner resets."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE users SET password_hash = ? WHERE username = ? COLLATE NOCASE",
+                (_hash_password(new_password), username),
+            )
+            if cur.rowcount == 0:
+                return False
+            conn.execute(
+                "DELETE FROM sessions WHERE user_id = "
+                "(SELECT user_id FROM users WHERE username = ? COLLATE NOCASE)",
+                (username,),
+            )
+            return True
+
     # ------------------------------------------------------------------ #
     # Admin — granted via scripts/make_admin.py only, never from the web,
     # so a compromised session can't escalate itself.

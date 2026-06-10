@@ -1038,3 +1038,20 @@ body.light .stats-table td { color: #24262e; border-color: #d8dae2; }
 body.light .book-rank { color: #d0d2da; }
 body.light .book-expand { color: #9aa; }
 body.light .site-footer { border-color: #d8dae2; }
+
+/* Forgot account help link in the auth modal */
+.auth-forgot {
+  margin-top: 0.8rem;
+  font-size: 0.8rem;
+  color: #8b8d97;
+  text-align: center;
+}
+
+.auth-forgot a {
+  color: #7986cb;
+  text-decoration: none;
+}
+
+.auth-forgot a:hover {
+  text-decoration: underline;
+}

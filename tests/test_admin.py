@@ -79,6 +79,32 @@ def test_admin_column_migration(tmp_path: Path):
     assert store.is_admin("u1") is True
 
 
+# ---- password reset ----------------------------------------------------------
+
+def test_set_password_changes_credentials(users: UserStore):
+    uid = users.create_user("alice", "oldpassword")
+    assert users.set_password("alice", "newpassword1") is True
+    assert users.verify_credentials("alice", "oldpassword") is None
+    assert users.verify_credentials("alice", "newpassword1") == uid
+
+
+def test_set_password_revokes_sessions(users: UserStore):
+    uid = users.create_user("alice", "oldpassword")
+    token = users.create_session(uid)
+    users.set_password("alice", "newpassword1")
+    assert users.user_for_session(token) is None
+
+
+def test_set_password_unknown_user(users: UserStore):
+    assert users.set_password("ghost", "whatever1") is False
+
+
+def test_set_password_case_insensitive_username(users: UserStore):
+    uid = users.create_user("Max_Ku", "oldpassword")
+    assert users.set_password("max_ku", "newpassword1") is True
+    assert users.verify_credentials("Max_Ku", "newpassword1") == uid
+
+
 # ---- activity log ------------------------------------------------------------
 
 def test_counts_by_kind(activity: ActivityStore):
