@@ -287,16 +287,16 @@ docker run --rm -p 8000:8000 -v "$(pwd)/data:/app/data" bookrecommender
 
 The live site at **https://iansbookrecs.com** runs on an AWS Lightsail instance (2 GB RAM / 2 vCPU / 60 GB SSD, Amazon Linux 2023, us-east-1) with a static IP. The stack is [`docker-compose.prod.yml`](docker-compose.prod.yml): the app container plus **Caddy** ([`Caddyfile`](Caddyfile)), which handles HTTPS automatically — certificates are fetched and renewed by Caddy with zero maintenance, stored in a Docker volume so restarts don't re-request them. Route 53 hosts the domain with A records (root + `www`) pointing at the static IP. The Lightsail firewall allows 22 (SSH, restricted), 80, and 443.
 
-**Shipping a change to production:**
+**Shipping a change to production** — one command after commit+push:
+
+```powershell
+.\scripts\deploy.ps1        # tests → checks everything's pushed → server pull+rebuild → verifies the site
+```
+
+The script connects via the SSH alias `iansbookrecs`, defined in the operator's local `~/.ssh/config` (host, user, and key path live there — never in this repo). Manual equivalent:
 
 ```bash
-# 1) locally: test, commit, push
-python -m pytest
-git push
-
-# 2) on the server: pull + rebuild + restart (one or two seconds of downtime)
-ssh -i <key.pem> ec2-user@98.94.245.234
-cd app && git pull && sudo docker compose -f docker-compose.prod.yml up -d --build
+ssh iansbookrecs "cd app && git pull && sudo docker compose -f docker-compose.prod.yml up -d --build"
 ```
 
 Frontend changes: remember to bump the `?v=N` query strings in `index.html`. Payload-shape or scoring changes: bump `CACHE_VERSION` in `server/cache/rec_cache.py` (see CLAUDE.md).
