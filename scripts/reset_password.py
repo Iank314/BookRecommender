@@ -6,8 +6,8 @@ they log in and (ideally) you tell them to treat it as temporary.
 Resetting also revokes all of the account's login sessions.
 
 Usage (on the production server):
-    docker exec bookrec python -m scripts.reset_password "Max_Ku"
-    docker exec bookrec python -m scripts.reset_password "Max_Ku" --password "TheirChoice123"
+    docker exec bookrec python -m scripts.reset_password "<username>"
+    docker exec bookrec python -m scripts.reset_password "<username>" --password "<new-password>"
 """
 
 from __future__ import annotations

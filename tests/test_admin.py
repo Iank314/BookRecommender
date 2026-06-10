@@ -81,28 +81,34 @@ def test_admin_column_migration(tmp_path: Path):
 
 # ---- password reset ----------------------------------------------------------
 
+# Obviously-fake fixture values: secret scanners (GitGuardian) flag literal
+# password-looking strings in public repos, even in tests.
+OLD_PW = "test-fixture-old"  # noqa: S105 — not a real credential
+NEW_PW = "test-fixture-new"  # noqa: S105 — not a real credential
+
+
 def test_set_password_changes_credentials(users: UserStore):
-    uid = users.create_user("alice", "oldpassword")
-    assert users.set_password("alice", "newpassword1") is True
-    assert users.verify_credentials("alice", "oldpassword") is None
-    assert users.verify_credentials("alice", "newpassword1") == uid
+    uid = users.create_user("alice", OLD_PW)
+    assert users.set_password("alice", NEW_PW) is True
+    assert users.verify_credentials("alice", OLD_PW) is None
+    assert users.verify_credentials("alice", NEW_PW) == uid
 
 
 def test_set_password_revokes_sessions(users: UserStore):
-    uid = users.create_user("alice", "oldpassword")
+    uid = users.create_user("alice", OLD_PW)
     token = users.create_session(uid)
-    users.set_password("alice", "newpassword1")
+    users.set_password("alice", NEW_PW)
     assert users.user_for_session(token) is None
 
 
 def test_set_password_unknown_user(users: UserStore):
-    assert users.set_password("ghost", "whatever1") is False
+    assert users.set_password("ghost", NEW_PW) is False
 
 
 def test_set_password_case_insensitive_username(users: UserStore):
-    uid = users.create_user("Max_Ku", "oldpassword")
-    assert users.set_password("max_ku", "newpassword1") is True
-    assert users.verify_credentials("Max_Ku", "newpassword1") == uid
+    uid = users.create_user("Max_Ku", OLD_PW)
+    assert users.set_password("max_ku", NEW_PW) is True
+    assert users.verify_credentials("Max_Ku", NEW_PW) == uid
 
 
 # ---- activity log ------------------------------------------------------------
