@@ -2,11 +2,11 @@
 
 ## Status — what's happening now
 
-**Live deployment.** The app is being put online from a home machine via a Cloudflare Tunnel: Docker Compose runs `bookrec` + `cloudflared`, with the SQLite DB persisting under `./data/library.db` and the tunnel handing out an HTTPS URL. See [Share publicly with Cloudflare Tunnel](#share-publicly-with-cloudflare-tunnel) below for the runbook.
+**Live in production at [iansbookrecs.com](https://iansbookrecs.com)** (June 2026). The app runs 24/7 on an AWS Lightsail instance ($12/mo plan, first 90 days free): Docker Compose runs the app container behind **Caddy**, which terminates HTTPS with auto-renewing Let's Encrypt certificates for `iansbookrecs.com` + `www`. DNS is Route 53; the instance has a static IP (98.94.245.234). SQLite persists on the instance disk at `~/app/data/library.db` — the full user base was migrated from the earlier home-machine deployment. See [Production deployment](#production-deployment-aws-lightsail) for the runbook.
 
 **Active iteration.** Recent work has been on recommendation-quality bug fixes surfaced by real use of the live app — categorization heuristics (facet-prefixed tags, series-name vs. genre ranking, genre derivation from description text), foreign-edition language detection (title script wins over metadata), and sequel detection from descriptions ("the fourth book in...", "the last book in this series"). The pattern lately is: try the app → spot a bad recommendation → add a small targeted fix + a regression test.
 
-**Planned next deployment stage.** Once the self-hosted version has settled, migrate off SQLite to managed Postgres (Neon's free tier) and deploy the container to Koyeb's free Nano tier — the free Koyeb plan has no persistent volumes, so the migration is the blocker, not scale. Scope: rewrite the three stores (`users_db`, `library_db`, `feedback_db`) to use `psycopg`, swap SQL flavors (parameter style, `strftime` → `extract(epoch)`, `ON CONFLICT` syntax), point at a `DATABASE_URL` env var, update tests. Roughly 2–3 hours.
+**Deployment history & next steps.** The app previously ran from a home machine via Cloudflare Quick Tunnel (runbook still below — it remains the zero-cost way to demo a branch). The old "migrate to Postgres for Koyeb" plan is **obsolete**: Lightsail's persistent disk means SQLite stays. Current operational priorities: enable Lightsail automatic snapshots (backups), set `GOOGLE_BOOKS_API_KEY` on the server, and optionally a GitHub Action for push-to-deploy.
 
 ---
 
@@ -282,6 +282,30 @@ Without Compose:
 docker build -t bookrecommender .
 docker run --rm -p 8000:8000 -v "$(pwd)/data:/app/data" bookrecommender
 ```
+
+### Production deployment (AWS Lightsail)
+
+The live site at **https://iansbookrecs.com** runs on an AWS Lightsail instance (2 GB RAM / 2 vCPU / 60 GB SSD, Amazon Linux 2023, us-east-1) with a static IP. The stack is [`docker-compose.prod.yml`](docker-compose.prod.yml): the app container plus **Caddy** ([`Caddyfile`](Caddyfile)), which handles HTTPS automatically — certificates are fetched and renewed by Caddy with zero maintenance, stored in a Docker volume so restarts don't re-request them. Route 53 hosts the domain with A records (root + `www`) pointing at the static IP. The Lightsail firewall allows 22 (SSH, restricted), 80, and 443.
+
+**Shipping a change to production:**
+
+```bash
+# 1) locally: test, commit, push
+python -m pytest
+git push
+
+# 2) on the server: pull + rebuild + restart (one or two seconds of downtime)
+ssh -i <key.pem> ec2-user@98.94.245.234
+cd app && git pull && sudo docker compose -f docker-compose.prod.yml up -d --build
+```
+
+Frontend changes: remember to bump the `?v=N` query strings in `index.html`. Payload-shape or scoring changes: bump `CACHE_VERSION` in `server/cache/rec_cache.py` (see CLAUDE.md).
+
+**Operational notes:**
+- The database is `~/app/data/library.db` **on the server** — the laptop copy is dev/test data now; they diverged at migration. Never deploy by copying a local DB over the server's.
+- Useful: `sudo docker compose -f docker-compose.prod.yml logs -f bookrec` (live request log), `logs caddy` (cert issuance), `ps` (status).
+- Costs: $12/mo instance (first 90 days free) + ~$13/yr domain. Static IP free while attached.
+- Backlog: enable Lightsail automatic snapshots for backups; set `GOOGLE_BOOKS_API_KEY` in an `.env` file or the compose environment.
 
 ### Share publicly with Cloudflare Tunnel
 

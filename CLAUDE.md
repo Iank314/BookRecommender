@@ -8,8 +8,15 @@ runbooks in depth; this file is the quick orientation + current direction.
 Full-stack content-based book recommender. FastAPI backend + vanilla-JS single-page
 frontend. Searches Google Books + Open Library, users register accounts, save books to
 a personal library, thumbs-up/down books, and get recommendations scored against their
-saved collection. SQLite storage, deployed from a home machine via Docker Compose +
-Cloudflare Tunnel.
+saved collection. SQLite storage.
+
+**Production: https://iansbookrecs.com — AWS Lightsail** (static IP 98.94.245.234,
+us-east-1, Amazon Linux 2023). `docker-compose.prod.yml` runs the app behind Caddy
+(auto-HTTPS via `Caddyfile`); DNS in Route 53. The LIVE database is
+`~/app/data/library.db` ON THE SERVER — the local `data/library.db` is dev data;
+they diverged at the June 2026 migration. Deploy = push to GitHub, then on the
+server: `cd app && git pull && sudo docker compose -f docker-compose.prod.yml up -d
+--build`. The Cloudflare-tunnel setup in `docker-compose.yml` is for local demos only.
 
 ## Product vision (as of June 2026)
 

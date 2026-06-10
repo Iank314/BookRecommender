@@ -1,0 +1,50 @@
+# Production stack for the EC2 deployment: the app behind Caddy, which
+# terminates HTTPS for iansbookrecs.com with auto-provisioned Let's Encrypt
+# certs. This REPLACES the Cloudflare-tunnel setup in docker-compose.yml —
+# that file is for local dev / the home-tunnel; this one is for the cloud box.
+#
+# On the EC2 instance:
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Requires DNS for iansbookrecs.com (and www) pointing at the instance, and
+# the security group allowing inbound 80 + 443.
+
+services:
+  bookrec:
+    build: .
+    image: bookrecommender:latest
+    container_name: bookrec
+    environment:
+      # Optional: raises Google Books' rate limit. Set on the host (or a .env
+      # file next to this compose file) before bringing the stack up.
+      GOOGLE_BOOKS_API_KEY: ${GOOGLE_BOOKS_API_KEY:-}
+      BOOKREC_DB_PATH: /app/data/library.db
+      # Always true here — Caddy serves the app over HTTPS, so the session
+      # cookie must be Secure or logins won't stick.
+      BOOKREC_SECURE_COOKIES: "true"
+    volumes:
+      # SQLite DB persists on the instance's EBS disk across restarts/redeploys.
+      - ./data:/app/data
+    # Not published to the host — only Caddy reaches it, over the internal
+    # Docker network. Nothing hits the app except through HTTPS.
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    container_name: caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data      # issued certs — MUST persist (LE rate limits)
+      - caddy_config:/config
+    depends_on:
+      - bookrec
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

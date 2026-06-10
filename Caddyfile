@@ -1,0 +1,15 @@
+# Caddy reverse proxy — automatic HTTPS for iansbookrecs.com.
+#
+# Caddy fetches and auto-renews free Let's Encrypt certificates the first time
+# it starts, as long as (1) the domain's DNS points at this server and (2)
+# ports 80 and 443 are reachable. Certs are stored in the caddy_data volume so
+# they survive restarts (don't re-request on every boot — Let's Encrypt rate-
+# limits). The email gets you expiry / renewal-failure notices.
+
+{
+	email kaufmanian49@gmail.com
+}
+
+iansbookrecs.com, www.iansbookrecs.com {
+	reverse_proxy bookrec:8000
+}
