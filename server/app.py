@@ -2198,6 +2198,10 @@ def _to_out(b, relevance: float | None = None) -> dict:
     return out
 
 
+# HEAD is what uptime monitors (UptimeRobot et al.) send by default — without
+# it the homepage answers 405 and monitoring reports the site "down" while
+# browsers (GET) work fine. FileResponse handles HEAD natively (headers only).
 @app.get("/", include_in_schema=False)
+@app.head("/", include_in_schema=False)
 def serve_frontend():
     return FileResponse(FRONTEND_DIR / "index.html")

@@ -56,3 +56,9 @@ def test_plain_google_id_still_matches():
     route, params = _match("DELETE", "/library/gb_abc123")
     assert route is not None and route.name == "library_remove"
     assert params["book_id"] == "gb_abc123"
+
+
+def test_homepage_accepts_head():
+    # Uptime monitors probe with HEAD; a 405 here reads as a false "down".
+    route, _ = _match("HEAD", "/")
+    assert route is not None and route.name == "serve_frontend"
