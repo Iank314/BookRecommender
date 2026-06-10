@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field, constr
 import hashlib
 
 from server.auth_throttle import LoginThrottle
+from server.moderation import username_is_clean
 from server.cache.rec_cache import CACHE_VERSION, RecommendationCache, TTLCache
 from server.fetcher.fetcher import Fetcher, GOOGLE_ENDPOINT, OPENLIB_ENDPOINT
 from server.models.book import Books
@@ -929,6 +930,11 @@ class AuthResponse(BaseModel):
 
 @app.post("/auth/register", response_model=AuthResponse, summary="Create an account")
 def auth_register(req: AuthRequest, response: Response):
+    if not username_is_clean(req.username):
+        raise HTTPException(
+            status_code=422,
+            detail="That username isn't allowed. Please pick a different one.",
+        )
     try:
         user_id = user_store.create_user(req.username, req.password)
     except UsernameTakenError:
