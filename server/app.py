@@ -6,24 +6,28 @@ import math
 import logging
 import os
 import re
+import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Response
+from fastapi import Body, Cookie, Depends, FastAPI, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, constr
 
+import hashlib
+
 from server.auth_throttle import LoginThrottle
-from server.cache.rec_cache import RecommendationCache
+from server.cache.rec_cache import CACHE_VERSION, RecommendationCache, TTLCache
 from server.fetcher.fetcher import Fetcher, GOOGLE_ENDPOINT, OPENLIB_ENDPOINT
 from server.models.book import Books
 from server.recommender.recommendation_engine import RecommendationEngine
 from server.recommender.recommender import Recommender
+from server.storage.activity_db import ActivityStore
 from server.storage.feedback_db import FeedbackKind, FeedbackStore
-from server.storage.library_db import LibraryStore
+from server.storage.library_db import LibraryStore, SectionNameTakenError
 from server.storage.users_db import UserStore, UsernameTakenError
 
 SESSION_COOKIE = "bookrec_session"
@@ -62,6 +66,8 @@ class BookOut(BaseModel):
     tags: list[str]
     metadata: dict
     relevance: float | None = None
+    # Populated on /library listings only; None everywhere else.
+    reading_status: Literal["want_to_read", "reading", "read"] | None = None
 
 
 class BuildRequest(BaseModel):
@@ -105,8 +111,14 @@ class SearchResponse(BaseModel):
 
 
 @app.post("/search", response_model=SearchResponse, summary="Search and recommend")
-def search(req: SearchRequest):
+def search(
+    req: SearchRequest,
+    bookrec_session: str | None = Cookie(default=None),
+):
     """Fetch from Google Books + Open Library, score, return paginated results."""
+    # Only counts page 1 so paging through results isn't counted as N searches.
+    if req.page == 1:
+        _record_activity("search", _soft_user_id(bookrec_session))
     fetcher = Fetcher(source=OPENLIB_ENDPOINT)
     query_lower = req.query.lower().strip()
 
@@ -316,6 +328,11 @@ def _score_genre(book, query_lower: str, from_subject_search: bool = True) -> fl
 
 
 class SimilarRequest(BaseModel):
+    # id is optional and only used to enrich a sparse source: an Open Library
+    # work id lets us back-fill genres + a real description before scoring.
+    # Sparse OL records ("First published in 2005", no tags) otherwise match
+    # candidates on publication boilerplate instead of story content.
+    id: str = ""
     title: str
     authors: list[str] = Field(default_factory=list)
     description: str = ""
@@ -323,9 +340,112 @@ class SimilarRequest(BaseModel):
     top_n: int = Field(20, ge=1, le=50)
 
 
-@app.post("/similar", response_model=list[BookOut], summary="Find similar books")
-def find_similar(req: SimilarRequest):
-    """Given a book's info, fetch related books and rank by TF-IDF similarity."""
+# Results scoring below this floor are dropped: at ~0.05 a "match" is a single
+# shared token, and showing one wrong book reads worse than showing none.
+MIN_SIMILAR_SCORE = 0.05
+
+# /similar is anonymous and re-runs the whole fetch+score pipeline per click,
+# so identical clicks within the TTL window are served from memory. Keyed on
+# the source book's identity (title+authors+tags+description), not a user.
+similar_cache = TTLCache(max_entries=256, ttl_seconds=3600)
+
+
+def _similar_cache_key(req: SimilarRequest) -> str:
+    parts = [
+        f"V:{CACHE_VERSION}",
+        f"I:{req.id.strip()}",
+        f"T:{req.title.strip().lower()}",
+        f"A:{'|'.join(a.strip().lower() for a in req.authors)}",
+        f"G:{'|'.join(t.strip().lower() for t in req.tags)}",
+        f"D:{req.description.strip().lower()}",
+        f"N:{req.top_n}",
+    ]
+    return hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()
+
+
+def _squash_author(name: str) -> str:
+    """Lowercase, letters only — 'Guilty Three' and 'Guiltythree' both
+    become 'guiltythree', so edition-level author spelling can't block a match."""
+    return re.sub(r"[^a-z]", "", name.lower())
+
+
+def _enrich_source_by_title_lookup(source: Books) -> None:
+    """Last-resort source enrichment: find the same book in either provider by
+    title and borrow the richest record's tags + description. Saves sparse
+    records (webnovels, fan prints) whose own id has nothing to enrich from —
+    without this they fall back to 'fiction' queries and match on noise."""
+    skey, _ = _split_series(source.title)
+    src_authors = {_squash_author(a) for a in source.authors if a}
+
+    def _gb() -> list[Books]:
+        return Fetcher(source=GOOGLE_ENDPOINT).fetch_google_page(
+            source.title, max_results=20, category="title")[0]
+
+    def _ol() -> list[Books]:
+        return Fetcher(source=OPENLIB_ENDPOINT).fetch_page(
+            source.title, batch_size=40, category="title")[0]
+
+    best_tags: list[str] = []
+    best_desc = ""
+    for fetch in (_gb, _ol):
+        try:
+            results = fetch()
+        except Exception:
+            continue
+        for cand in results:
+            if _split_series(cand.title)[0] != skey:
+                continue
+            if src_authors:
+                cand_authors = {_squash_author(a) for a in cand.authors if a}
+                if cand_authors and not (src_authors & cand_authors):
+                    continue  # same title, different book
+            if len(cand.description) > len(best_desc):
+                best_desc = cand.description
+            if cand.tags and not best_tags:
+                best_tags = cand.tags
+        if best_tags and len(best_desc) >= 60:
+            break  # rich enough, skip the second provider
+
+    if best_tags and not source.tags:
+        source.tags = best_tags
+    if len(best_desc) > len(source.description):
+        source.description = best_desc
+
+
+def _gather_similar_candidates(
+    req: SimilarRequest,
+) -> tuple[Books, str | None, list[Books]]:
+    """Candidate-gathering half of "Find Similar": build genre queries from
+    the source's tags, fetch from both providers, keep the source's language,
+    enrich tagless candidates, and drop text-only sequels / nonfiction.
+    Returns (source_book, source_language, candidates) — candidates may be
+    empty. Shared by the /similar endpoint and scripts/explain_similar.py,
+    so the debug tool exercises exactly the pipeline users hit.
+    """
+    source_book = Books(
+        id=req.id or "__source__",
+        title=req.title,
+        authors=req.authors,
+        description=req.description,
+        tags=req.tags,
+        metadata={},
+    )
+    # --- 0) Enrich a sparse source before anything keys off its tags/text ---
+    # _ensure_details back-fills genres + the full description for Open
+    # Library works; the genre queries below and the scorer both depend on it.
+    if not source_book.tags or len(source_book.description) < 60:
+        try:
+            _ensure_details(source_book)
+        except Exception:
+            logger.warning("Source enrichment failed for %r.", req.title, exc_info=True)
+    # Still sparse (webnovels, fan prints — no enrichable work id)? Find the
+    # same book in either provider by title and borrow its tags/description.
+    if not source_book.tags or len(source_book.description) < 60:
+        try:
+            _enrich_source_by_title_lookup(source_book)
+        except Exception:
+            logger.warning("Title-lookup enrichment failed for %r.", req.title, exc_info=True)
+    src_lang = _book_language(source_book)
 
     # --- 1) Build genre-only search queries, filtering out proper nouns ---
     title_lower = req.title.lower()
@@ -342,7 +462,7 @@ def find_similar(req: SimilarRequest):
     # Adventure" — searching that whole string as a subject pulls back
     # noise (e.g. random Russian fiction) instead of clean genre matches.
     raw_tags: list[str] = []
-    for tag in req.tags:
+    for tag in source_book.tags:  # post-enrichment, may be richer than req.tags
         for part in re.split(r"[/,]", tag):
             atom = part.strip()
             if atom:
@@ -376,7 +496,13 @@ def find_similar(req: SimilarRequest):
         else:
             specific_queries.append(cleaned)
 
-    genre_queries = specific_queries or generic_queries or ["fiction"]
+    genre_queries = specific_queries or generic_queries
+    if not genre_queries:
+        # No usable tags at all — scan title + description for a known genre
+        # keyword (same fallback the display layer uses) before surrendering
+        # to "fiction", whose candidates are mostly random classics.
+        derived = _derive_genre_from_text(f"{source_book.title} {source_book.description}")
+        genre_queries = [derived.lower()] if derived else ["fiction"]
 
     # Up to 5 atom queries — slash-splitting often produces more useful atoms.
     genre_queries = genre_queries[:5]
@@ -425,55 +551,60 @@ def find_similar(req: SimilarRequest):
             logger.warning("Open Library similar-book fetch failed for query %r.", query, exc_info=True)
 
     if not all_books:
-        return []
+        return source_book, src_lang, []
 
-    # --- 3) Build the source book; keep only candidates in its language ---
+    # --- 3) Keep only candidates in the source's language ---
     # An English source shouldn't surface Russian editions of the same trope.
-    source_book = Books(
-        id="__source__",
-        title=req.title,
-        authors=req.authors,
-        description=req.description,
-        tags=req.tags,
-        metadata={},
-    )
-    src_lang = _book_language(source_book)
     if src_lang and src_lang != "non-latin":
         all_books = [b for b in all_books if _book_language(b) == src_lang]
-        if not all_books:
-            return []
 
-    # --- 4) Score candidates via token-set F1 over title + tags + description ---
-    # TF-IDF cosine was unreliable here: source and candidate often come from
-    # different sources (Google Books vs Open Library) with different tag
-    # vocabularies and wildly different description lengths, so the cosine
-    # collapsed near zero. Token-set F1 (recall × precision) is more
-    # interpretable: it asks how much of each book's vocabulary the other
-    # captures, regardless of doc length.
-    src_tokens = _book_tokens(source_book)
-    if not src_tokens:
+    # --- 4) Enrich, filter, and score — same pipeline as /library/recommend ---
+    # Tagless OL candidates get genres + a fuller description back-filled so
+    # they can be judged on genre, not on a one-line description.
+    _enrich_tagless_candidates(all_books, [source_book])
+
+    # Drop candidates whose description marks them as a mid-series volume the
+    # title doesn't reveal ("the fourth book in...") — title-marked volumes
+    # still flow through the series collapse + entry-point swap below.
+    all_books = [
+        c for c in all_books
+        if _split_series(c.title)[1] is not None or not _desc_is_sequel(c.description)
+    ]
+
+    # A fiction source shouldn't surface nonfiction that shares theme words
+    # ("magic" the occult topic vs. fantasy magic).
+    if _fiction_signal(source_book) > 0:
+        all_books = [c for c in all_books if _fiction_signal(c) >= 0]
+
+    return source_book, src_lang, all_books
+
+
+@app.post("/similar", response_model=list[BookOut], summary="Find similar books")
+def find_similar(
+    req: SimilarRequest,
+    bookrec_session: str | None = Cookie(default=None),
+):
+    """Given a book's info, fetch genre-matched candidates and rank them by
+    the same genre-overlap ⊕ description-similarity blend as /library/recommend."""
+
+    # Recorded before the cache check — a cache hit is still a use.
+    _record_activity("similar", _soft_user_id(bookrec_session))
+
+    cache_key = _similar_cache_key(req)
+    cached = similar_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    source_book, src_lang, candidates = _gather_similar_candidates(req)
+    if not candidates:
         return []
 
-    # IDF over the candidate corpus: distinctive words like "nightmare" or
-    # "cultivation" carry high weight, while filler like "world"/"young"/"life"
-    # gets near-zero weight. This stops verbose-description classics from
-    # matching everything just because they share common vocabulary.
-    idf = _compute_token_idf(all_books)
-    default_idf = math.log(len(all_books) + 1) + 1  # weight for unseen source tokens
-
-    scored: list[tuple[Books, float]] = []
-    for cand in all_books:
-        cand_tokens = _book_tokens(cand)
-        sim = _idf_weighted_f1(src_tokens, cand_tokens, idf, default_idf)
-        if sim <= 0:
-            continue
-        # Popularity is a gentle tiebreaker only — at 0.4 it was outranking
-        # similarity and surfacing widely-edited classics.
-        pop = _book_popularity(cand)
-        final = sim + (1.0 - sim) * 0.1 * pop
-        scored.append((cand, final))
-
-    scored.sort(key=lambda x: x[1], reverse=True)
+    scored = _score_similar_candidates(source_book, candidates)
+    # Floor: a 2% match is a single shared token, not a recommendation.
+    # Better an honest "no similar books found" than one wrong book.
+    scored = [(c, s) for c, s in scored if s >= MIN_SIMILAR_SCORE]
+    if not scored:
+        return []
 
     # --- 5) Collapse each series to its earliest-volume entry ---
     # If several volumes of one series rank, keep only the earliest present —
@@ -506,7 +637,12 @@ def find_similar(req: SimilarRequest):
         with ThreadPoolExecutor(max_workers=min(8, len(top))) as ex:
             top = list(ex.map(_resolve, top))
 
-    return [_to_out(book, relevance=round(sim * 100, 1)) for book, sim in top]
+    result = [_to_out(book, relevance=round(sim * 100, 1)) for book, sim in top]
+    # Empty results aren't cached — the earlier exits are usually transient
+    # provider failures, and an hour of cached emptiness would mask recovery.
+    if result:
+        similar_cache.put(cache_key, result)
+    return result
 
 
 _SIM_STOPWORDS = {
@@ -518,6 +654,12 @@ _SIM_STOPWORDS = {
     "first", "second", "third", "english",
     # Genre-noise: every fiction book shares these so they add no signal.
     "fiction", "novel", "novels", "story", "stories", "tale", "tales",
+    # Publication boilerplate — sparse Open Library descriptions are often just
+    # "First published in 2005", and these tokens were the TOP match driver for
+    # such records (found via scripts/explain_similar.py).
+    "published", "publisher", "publishing", "publication", "bestselling",
+    "bestseller", "author", "authors", "copyright", "paperback", "hardcover",
+    "translated", "translation", "reprint", "york",  # "New York Times bestseller"
 }
 
 _LANG_QUALIFIERS = {
@@ -551,42 +693,45 @@ def _book_popularity(book: Books) -> float:
     return score
 
 
-def _book_tokens(book: Books) -> set[str]:
-    """Lowercased word tokens from title + tags + description, minus stopwords."""
-    parts = [book.title, " ".join(book.tags), book.description]
-    text = " ".join(parts).lower()
-    return {
-        tok for tok in re.findall(r"[a-z]+", text)
-        if len(tok) > 2 and tok not in _SIM_STOPWORDS
-    }
+def _fold_token(tok: str) -> str:
+    """Light plural/variant folding so 'swords'/'sword' and 'stories'/'story'
+    land on the same token — without folding, they contribute zero overlap.
+
+    Deliberately tiny: a real stemmer (Porter) over-stems short description
+    vocabulary and hurts precision. The folded form doesn't need to be a real
+    word ('stories' and 'story' both → 'stori') because both sides of every
+    comparison fold identically.
+    """
+    if len(tok) > 4 and tok.endswith("ies"):
+        return tok[:-3] + "i"          # stories → stori (with y→i below, story → stori)
+    if len(tok) > 4 and tok.endswith(("sses", "ches", "shes", "xes", "zes")):
+        return tok[:-2]                # witches → witch, kisses → kiss
+    if len(tok) > 3 and tok.endswith("s") and not tok.endswith(("ss", "us", "is")):
+        tok = tok[:-1]                 # swords → sword, horses → horse
+    if len(tok) > 3 and tok.endswith("y"):
+        return tok[:-1] + "i"          # story → stori, matching the ies-fold
+    return tok
 
 
 def _text_tokens(book: Books) -> set[str]:
-    """Token set from title + description only — genre tags excluded.
+    """Folded token set from title + description only — genre tags excluded.
 
     Used for the description-similarity signal, kept separate from the genre
     signal so genre words don't get counted twice.
     """
     text = f"{book.title} {book.description}".lower()
-    return {
-        tok for tok in re.findall(r"[a-z]+", text)
-        if len(tok) > 2 and tok not in _SIM_STOPWORDS
-    }
+    out: set[str] = set()
+    for tok in re.findall(r"[a-z]+", text):
+        if len(tok) <= 2 or tok in _SIM_STOPWORDS:
+            continue
+        folded = _fold_token(tok)
+        if folded in _SIM_STOPWORDS:   # e.g. "ones" → "one"
+            continue
+        out.add(folded)
+    return out
 
 
-def _token_f1(a: set[str], b: set[str]) -> float:
-    """Token-set F1: harmonic mean of recall and precision (unweighted)."""
-    if not a or not b:
-        return 0.0
-    inter = len(a & b)
-    if inter == 0:
-        return 0.0
-    recall = inter / len(a)
-    precision = inter / len(b)
-    return 2 * recall * precision / (recall + precision)
-
-
-def _compute_token_idf(books: list[Books], token_fn=_book_tokens) -> dict[str, float]:
+def _compute_token_idf(books: list[Books], token_fn=_text_tokens) -> dict[str, float]:
     """IDF for every token across the candidate corpus."""
     df: dict[str, int] = {}
     for book in books:
@@ -616,6 +761,51 @@ def _idf_weighted_f1(
     return 2 * recall * precision / (recall + precision)
 
 
+def _score_similar_candidates(
+    source: Books, candidates: list[Books],
+) -> list[tuple[Books, float]]:
+    """Score "Find Similar" candidates against one source book, best first.
+
+    Same math as the /library/recommend scoring loop: IDF-weighted token-set
+    F1 over title + description (genre tags excluded so genre isn't counted
+    twice), blended 50/50 with genre-atom overlap when both sides carry tags,
+    and popularity as a small multiplicative tiebreaker. The endpoint
+    previously lumped title + tags + description into one token bag and added
+    popularity on top — a candidate sharing only genre-tag strings scored as
+    if its text matched, and popular-but-irrelevant books nearly doubled
+    their score at the low end.
+    """
+    src_text = _text_tokens(source)
+    src_genres = set(_genre_atoms(source.tags)[0])
+    if not src_text and not src_genres:
+        return []
+
+    idf = _compute_token_idf(candidates)
+    default_idf = math.log(len(candidates) + 1) + 1
+    W_GENRE, W_DESC = 0.5, 0.5
+
+    scored: list[tuple[Books, float]] = []
+    for cand in candidates:
+        cand_text = _text_tokens(cand)
+        desc_score = _idf_weighted_f1(src_text, cand_text, idf, default_idf)
+        # When the source has text, a candidate must share some of it — genre
+        # overlap alone can't rank it (every candidate was fetched by genre).
+        if src_text and desc_score <= 0:
+            continue
+        cand_genres = set(_genre_atoms(cand.tags)[0])
+        if cand_genres and src_genres:
+            combined = W_GENRE * _genre_score(cand_genres, src_genres) + W_DESC * desc_score
+        else:
+            combined = desc_score
+        if combined <= 0:
+            continue
+        final = combined * (1.0 + 0.05 * _book_popularity(cand))
+        scored.append((cand, final))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored
+
+
 def _is_about_source(book, filter_words: set) -> bool:
     """Check if a book is about the source (biography, companion, etc.)."""
     title_lower = book.title.lower()
@@ -635,8 +825,23 @@ def _dedup_key_raw(title: str, author: str) -> str:
 user_store = UserStore()
 library_store = LibraryStore()
 feedback_store = FeedbackStore()
+activity_store = ActivityStore()
 rec_cache = RecommendationCache()
 login_throttle = LoginThrottle()
+
+
+def _soft_user_id(session_token: str | None) -> str | None:
+    """Resolve a session cookie to a user_id without requiring one — for
+    attributing activity on endpoints that are open to anonymous visitors."""
+    return user_store.user_for_session(session_token) if session_token else None
+
+
+def _record_activity(kind: str, user_id: str | None) -> None:
+    """Best-effort: a stats insert must never fail a real request."""
+    try:
+        activity_store.record(kind, user_id)
+    except Exception:
+        logger.warning("Failed to record %s activity.", kind, exc_info=True)
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
@@ -673,6 +878,15 @@ def get_current_user_id(
     raise HTTPException(status_code=401, detail="Not logged in.")
 
 
+def get_admin_user_id(user_id: str = Depends(get_current_user_id)) -> str:
+    """Like get_current_user_id, but 403s unless the account is an admin.
+    Admin is granted via scripts/make_admin.py only — there is deliberately
+    no web path to set the flag."""
+    if not user_store.is_admin(user_id):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    return user_id
+
+
 class AuthRequest(BaseModel):
     username: Username
     password: Password
@@ -680,6 +894,7 @@ class AuthRequest(BaseModel):
 
 class AuthResponse(BaseModel):
     username: str
+    is_admin: bool = False
 
 
 @app.post("/auth/register", response_model=AuthResponse, summary="Create an account")
@@ -705,7 +920,10 @@ def auth_login(req: AuthRequest, response: Response):
         raise HTTPException(status_code=401, detail="Invalid username or password.")
     login_throttle.clear(req.username)
     _set_session_cookie(response, user_store.create_session(user_id))
-    return AuthResponse(username=user_store.get_username(user_id) or req.username)
+    return AuthResponse(
+        username=user_store.get_username(user_id) or req.username,
+        is_admin=user_store.is_admin(user_id),
+    )
 
 
 @app.post("/auth/logout", summary="Log out")
@@ -724,7 +942,49 @@ def auth_me(user_id: str = Depends(get_current_user_id)):
     username = user_store.get_username(user_id)
     if not username:
         raise HTTPException(status_code=401, detail="Not logged in.")
-    return AuthResponse(username=username)
+    return AuthResponse(username=username, is_admin=user_store.is_admin(user_id))
+
+
+# ------------------------------------------------------------------ #
+# Admin — usage statistics (admin accounts only)
+# ------------------------------------------------------------------ #
+@app.get("/admin/stats", summary="Admin: accounts and usage statistics")
+def admin_stats(user_id: str = Depends(get_admin_user_id)):
+    now = int(time.time())
+    day, week = now - 86_400, now - 7 * 86_400
+
+    last_seen = activity_store.last_seen_by_user()
+    accounts = []
+    for a in user_store.list_accounts():
+        accounts.append({
+            "username": a["username"],
+            "is_admin": a["is_admin"],
+            "created_at": a["created_at"],
+            "books_saved": len(library_store.all(a["user_id"])),
+            "last_active": last_seen.get(a["user_id"]),
+        })
+
+    return {
+        "now": now,
+        "accounts_total": len(accounts),
+        "accounts": accounts,
+        # Events by kind: search (page 1 only), similar, recommend.
+        "activity": {
+            "last_24h": activity_store.counts_since(day),
+            "last_7d": activity_store.counts_since(week),
+            "all_time": activity_store.counts_since(0),
+        },
+        # Distinct logged-in users with any tracked event.
+        "active_users": {
+            "last_24h": activity_store.active_users_since(day),
+            "last_7d": activity_store.active_users_since(week),
+        },
+        # Tracked events from visitors with no session (anonymous searches).
+        "anonymous_events": {
+            "last_24h": activity_store.anonymous_events_since(day),
+            "last_7d": activity_store.anonymous_events_since(week),
+        },
+    }
 
 
 # ------------------------------------------------------------------ #
@@ -753,17 +1013,123 @@ def library_add(req: SaveBookRequest, user_id: str = Depends(get_current_user_id
     return _to_out(book)
 
 
-@app.delete("/library/{book_id}", summary="Remove a book from your library")
-def library_remove(book_id: str, user_id: str = Depends(get_current_user_id)):
-    if not library_store.remove(user_id, book_id):
+@app.get("/library", response_model=list[BookOut], summary="List your saved books")
+def library_list(user_id: str = Depends(get_current_user_id)):
+    status_by_id = library_store.statuses(user_id)
+    out = []
+    for b in library_store.all(user_id):
+        item = _to_out(b)
+        item["reading_status"] = status_by_id.get(b.id)
+        out.append(item)
+    return out
+
+
+class ReadingStatusRequest(BaseModel):
+    book_id: NonEmptyStr
+    status: Literal["want_to_read", "reading", "read"] | None = None  # None clears
+
+
+@app.post("/library/status", summary="Set or clear a saved book's reading status")
+def library_set_status(
+    req: ReadingStatusRequest, user_id: str = Depends(get_current_user_id),
+):
+    if not library_store.set_status(user_id, req.book_id, req.status):
         raise HTTPException(status_code=404, detail="Book not in library.")
+    # No rec-cache invalidation: status doesn't feed the scoring pipeline;
+    # status-scoped recommendations go through the book_ids scope, which is
+    # already part of the cache signature.
+    return {"status": "ok"}
+
+
+# ------------------------------------------------------------------ #
+# Sections — user-defined shelves within the saved library
+# ------------------------------------------------------------------ #
+SectionName = constr(strip_whitespace=True, min_length=1, max_length=60)
+
+
+class SectionRequest(BaseModel):
+    name: SectionName
+
+
+class SectionOut(BaseModel):
+    id: int
+    name: str
+    book_ids: list[str]
+
+
+class SectionBookRequest(BaseModel):
+    book_id: NonEmptyStr
+    # When set, the book is moved: removed from this section and added to the
+    # target in one transaction. Omit for a plain add (book can be in both).
+    from_section_id: int | None = None
+
+
+@app.get("/library/sections", response_model=list[SectionOut],
+         summary="List your library sections")
+def sections_list(user_id: str = Depends(get_current_user_id)):
+    return library_store.sections(user_id)
+
+
+@app.post("/library/sections", response_model=SectionOut,
+          summary="Create a library section")
+def sections_create(req: SectionRequest, user_id: str = Depends(get_current_user_id)):
+    try:
+        return library_store.create_section(user_id, req.name)
+    except SectionNameTakenError:
+        raise HTTPException(status_code=409, detail="You already have a section with that name.")
+
+
+@app.patch("/library/sections/{section_id}", summary="Rename a section")
+def sections_rename(
+    section_id: int, req: SectionRequest,
+    user_id: str = Depends(get_current_user_id),
+):
+    try:
+        if not library_store.rename_section(user_id, section_id, req.name):
+            raise HTTPException(status_code=404, detail="Section not found.")
+    except SectionNameTakenError:
+        raise HTTPException(status_code=409, detail="You already have a section with that name.")
+    return {"status": "ok"}
+
+
+@app.delete("/library/sections/{section_id}", summary="Delete a section")
+def sections_delete(section_id: int, user_id: str = Depends(get_current_user_id)):
+    if not library_store.delete_section(user_id, section_id):
+        raise HTTPException(status_code=404, detail="Section not found.")
     rec_cache.invalidate(user_id)
     return {"status": "ok"}
 
 
-@app.get("/library", response_model=list[BookOut], summary="List your saved books")
-def library_list(user_id: str = Depends(get_current_user_id)):
-    return [_to_out(b) for b in library_store.all(user_id)]
+@app.post("/library/sections/{section_id}/books",
+          summary="Add a saved book to a section (or move it from another)")
+def sections_add_book(
+    section_id: int, req: SectionBookRequest,
+    user_id: str = Depends(get_current_user_id),
+):
+    if req.from_section_id is not None:
+        ok = library_store.move_between_sections(
+            user_id, req.book_id, req.from_section_id, section_id,
+        )
+        detail = "Section not found, or that book isn't in the source section."
+    else:
+        ok = library_store.add_to_section(user_id, section_id, req.book_id)
+        detail = "Section not found, or that book isn't in your library."
+    if not ok:
+        raise HTTPException(status_code=404, detail=detail)
+    rec_cache.invalidate(user_id)
+    return {"status": "ok"}
+
+
+@app.delete("/library/sections/{section_id}/books/{book_id:path}",
+            summary="Remove a book from a section")
+def sections_remove_book(
+    section_id: int, book_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    if not library_store.remove_from_section(user_id, section_id, book_id):
+        raise HTTPException(status_code=404, detail="That book isn't in this section.")
+    rec_cache.invalidate(user_id)
+    return {"status": "ok"}
 
 
 # ------------------------------------------------------------------ #
@@ -801,7 +1167,10 @@ def feedback_set(req: FeedbackRequest, user_id: str = Depends(get_current_user_i
     return out
 
 
-@app.delete("/library/feedback/{book_id}", summary="Clear feedback on a book")
+# NOTE: Open Library book ids contain slashes ("ol_/works/OL123W"). The ASGI
+# spec decodes %2F before routing, so these book-id segments must use the
+# :path converter or every OL book 404s on delete.
+@app.delete("/library/feedback/{book_id:path}", summary="Clear feedback on a book")
 def feedback_remove(book_id: str, user_id: str = Depends(get_current_user_id)):
     if not feedback_store.remove(user_id, book_id):
         raise HTTPException(status_code=404, detail="No feedback recorded for that book.")
@@ -823,6 +1192,44 @@ def feedback_list(
         out.append(item)
     return out
 
+
+# Registered AFTER /library/feedback/... and /library/sections/... on purpose:
+# the {book_id:path} converter matches slashes (required for OL ids), so this
+# route would swallow those URLs if it were registered first.
+@app.delete("/library/{book_id:path}", summary="Remove a book from your library")
+def library_remove(book_id: str, user_id: str = Depends(get_current_user_id)):
+    if not library_store.remove(user_id, book_id):
+        raise HTTPException(status_code=404, detail="Book not in library.")
+    rec_cache.invalidate(user_id)
+    return {"status": "ok"}
+
+
+# Canonical names for genre atoms that mean the same thing across Google Books
+# and Open Library vocabularies — without folding, a GB "Science Fiction" book
+# and an OL "sci-fi" book score ZERO genre overlap. Targets are chosen so the
+# fiction/nonfiction signal survives the mapping (e.g. "fantasy fiction" →
+# "fantasy", which _FICTION_GENRE_WORDS still recognises). Extend as bad recs
+# surface new aliases (scripts/explain_similar.py shows each book's atoms).
+_GENRE_SYNONYMS = {
+    "sci-fi": "science fiction",
+    "sci fi": "science fiction",
+    "scifi": "science fiction",
+    "science-fiction": "science fiction",
+    "sf": "science fiction",
+    "fantasy fiction": "fantasy",
+    "horror fiction": "horror",
+    "horror tales": "horror",
+    "thrillers": "thriller",
+    "suspense fiction": "thriller",
+    "detective and mystery stories": "mystery",
+    "mystery and detective": "mystery",
+    "mystery & detective": "mystery",
+    "love stories": "romance",
+    "romance fiction": "romance",
+    "graphic novels": "graphic novel",
+    "comics & graphic novels": "graphic novel",
+    "ya": "young adult",
+}
 
 # Open Library facet prefixes. "genre:"/"subject:" carry a usable genre once the
 # prefix is stripped; the rest ("series:Dungeon Crawler Carl", "person:...") are
@@ -858,7 +1265,8 @@ def _genre_atoms(tags: list[str]) -> tuple[list[str], list[str]]:
             words = [w for w in atom.split() if w.lower() not in _LANG_QUALIFIERS]
             if not words:
                 continue
-            key = " ".join(words).lower()
+            key = " ".join(words).lower().rstrip(".")  # OL tags like "fantasy fiction."
+            key = _GENRE_SYNONYMS.get(key, key)
             if key in _GENERIC_GENRE_TAGS:
                 generic.append(key)
             else:
@@ -1218,6 +1626,28 @@ def _enrich_tagless_candidates(candidates: list[Books], saved: list[Books]) -> N
         logger.warning("Library recommendation enrichment failed.", exc_info=True)
 
 
+def _recommendation_exclusions(
+    library_books: list[Books],
+    liked_books: list[Books],
+    disliked_books: list[Books],
+) -> tuple[set[str], set[str]]:
+    """(dedup keys, normalised titles) a recommendation must never return.
+
+    Spans the FULL library (not just a scoped subset — a section run must not
+    recommend back a book saved elsewhere) plus both feedback lists: disliked
+    books are unwanted, and liked books are already known to the user — their
+    job is to *re-weight* similar candidates, not to reappear as picks. Both
+    keys and titles are matched so a different edition / source can't slip
+    back in.
+    """
+    keys = {_dedup_key(b) for b in library_books}
+    titles = {_norm_title(b.title) for b in library_books}
+    for b in (*liked_books, *disliked_books):
+        keys.add(_dedup_key(b))
+        titles.add(_norm_title(b.title))
+    return keys, titles
+
+
 def _fetch_genre_candidates(query: str) -> list[Books]:
     """Fetch Google Books + Open Library results for one genre query."""
     out: list[Books] = []
@@ -1236,36 +1666,78 @@ def _fetch_genre_candidates(query: str) -> list[Books]:
     return out
 
 
+class RecommendScopeRequest(BaseModel):
+    """Optional body for /library/recommend narrowing which saved books drive
+    the recommendations. `section_id` scopes to a section; `book_ids` to an
+    ad-hoc selection of saved books. Omit both (or send no body) for the
+    whole library. When both are present, `section_id` wins."""
+    section_id: int | None = None
+    book_ids: list[str] | None = None
+
+
 @app.post("/library/recommend", response_model=list[BookOut],
           summary="Get recommendations based on your library")
 def library_recommend(
+    scope_req: RecommendScopeRequest | None = Body(default=None),
     top_n: int = Query(20, ge=1, le=50),
     user_id: str = Depends(get_current_user_id),
 ):
-    """Recommend books matching the saved library.
+    """Recommend books matching the saved library (or a scoped subset of it).
 
-    Pipeline: back-fill saved-book details → fetch candidates by the library's
-    genres (concurrently) → keep only the library's languages → enrich tagless
+    Pipeline: back-fill saved-book details → fetch candidates by the scope's
+    genres (concurrently) → keep only the scope's languages → enrich tagless
     candidates → score each by a blend of genre overlap and IDF-weighted
     description similarity against its best-matching saved book → diversify so
     no single saved book floods the results.
+
+    Scoring, genre profile, and language gating run on the scoped books only;
+    the exclusion sets (don't recommend back what the user already has) always
+    span the full library plus dislikes.
     """
-    saved = library_store.all(user_id)
-    if not saved:
+    _record_activity("recommend", user_id)
+
+    library_books = library_store.all(user_id)
+    if not library_books:
         raise HTTPException(status_code=400, detail="Your library is empty. Save some books first.")
+
+    # --- Resolve the scope: a section, an ad-hoc selection, or everything ---
+    scoped = False
+    if scope_req and scope_req.section_id is not None:
+        section = library_store.section_books(user_id, scope_req.section_id)
+        if section is None:
+            raise HTTPException(status_code=404, detail="Section not found.")
+        if not section:
+            raise HTTPException(
+                status_code=400,
+                detail="That section is empty. Add some books to it first.",
+            )
+        saved, scoped = section, True
+    elif scope_req and scope_req.book_ids:
+        wanted = set(scope_req.book_ids)
+        saved = [b for b in library_books if b.id in wanted]
+        if not saved:
+            raise HTTPException(
+                status_code=400,
+                detail="None of the selected books are in your library.",
+            )
+        scoped = True
+    else:
+        saved = library_books
 
     # --- Fetch feedback (used by both the cache key and the scoring loop) ---
     feedback_pairs = feedback_store.all(user_id)
     liked_books = [b for b, k in feedback_pairs if k == "up"]
     disliked_books = [b for b, k in feedback_pairs if k == "down"]
 
-    # --- Cache lookup: signature spans saved + liked + disliked so any
-    # change (add, remove, flip a thumbs-up to thumbs-down) naturally
-    # produces a fresh key. Hits skip the whole fetch/score/enrich pipeline.
+    # --- Cache lookup: signature spans saved + liked + disliked (+ the scope
+    # when one was requested) so any change — add, remove, flip a thumbs-up,
+    # different section / selection — naturally produces a fresh key. Hits
+    # skip the whole fetch/score/enrich pipeline.
     sig = RecommendationCache.signature(
-        saved=(b.id for b in saved),
+        saved=(b.id for b in library_books),
         liked=(b.id for b in liked_books),
         disliked=(b.id for b in disliked_books),
+        scope=(b.id for b in saved) if scoped else (),
     )
     cached = rec_cache.get(user_id, sig, top_n)
     if cached is not None:
@@ -1284,16 +1756,13 @@ def library_recommend(
     # --- 1) Build the library's genre profile + search queries ---
     profile_specific, genre_queries = _library_genre_profile(saved)
 
-    # --- 2) Fetch candidates (queries run concurrently), skipping saved + disliked ---
-    # The genre queries are fetched in parallel: Open Library searches are slow,
-    # so issuing 8 of them sequentially dominated request time.
-    # Disliked books share the same exclusion path as saved ones — by dedup
-    # key and by normalised title — so they can't slip back in via a different
-    # edition / source.
-    seen_keys = {_dedup_key(b) for b in saved}
-    seen_keys.update(_dedup_key(b) for b in disliked_books)
-    saved_titles = {_norm_title(b.title) for b in saved}
-    saved_titles.update(_norm_title(b.title) for b in disliked_books)
+    # --- 2) Fetch candidates (queries run concurrently), skipping books the
+    # user already has an opinion on. The genre queries are fetched in
+    # parallel: Open Library searches are slow, so issuing 8 of them
+    # sequentially dominated request time.
+    seen_keys, saved_titles = _recommendation_exclusions(
+        library_books, liked_books, disliked_books,
+    )
     candidates: list[Books] = []
     with ThreadPoolExecutor(max_workers=min(8, len(genre_queries))) as ex:
         fetched = list(ex.map(_fetch_genre_candidates, genre_queries))

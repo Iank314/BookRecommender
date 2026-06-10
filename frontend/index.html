@@ -5,12 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Book Recommender</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📚</text></svg>" />
-  <link rel="stylesheet" href="/static/style.css" />
+  <!-- ?v= busts browser caches on deploy — bump it whenever app.js/style.css change. -->
+  <link rel="stylesheet" href="/static/style.css?v=8" />
 </head>
 <body>
   <header>
     <div id="auth-bar">
       <span id="auth-status"></span>
+      <button type="button" id="admin-stats-btn" class="auth-btn hidden">📊 Stats</button>
       <button type="button" id="auth-login-btn" class="auth-btn hidden">Log in</button>
       <button type="button" id="auth-logout-btn" class="auth-btn hidden">Log out</button>
     </div>
@@ -52,6 +54,15 @@
     <div id="pagination" class="hidden"></div>
   </main>
 
+  <footer class="site-footer">
+    <p>
+      Have a suggestion or found a bug?
+      <a href="mailto:kaufmanian49@gmail.com?subject=Book%20Recommender%20Suggestion">
+        kaufmanian49@gmail.com
+      </a>
+    </p>
+  </footer>
+
   <div id="auth-modal" class="hidden">
     <div class="auth-card">
       <button type="button" id="auth-close" class="auth-close" aria-label="Close">&times;</button>
@@ -69,6 +80,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=8"></script>
 </body>
 </html>

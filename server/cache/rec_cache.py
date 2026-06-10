@@ -12,9 +12,18 @@ rather than wait for eviction.
 from __future__ import annotations
 
 import hashlib
+import time
 from collections import OrderedDict
 from threading import Lock
 from typing import Iterable
+
+# Bump whenever the shape of a cached payload changes — _to_out fields,
+# display-tag cleanup, scoring that alters what gets returned. The version is
+# mixed into every signature, so payloads cached by older code can't survive
+# a hot reload and be served with the new code's expectations.
+# v2: token plural-folding + genre-synonym folding changed scoring output.
+# v3: liked books excluded from recommendation candidates.
+CACHE_VERSION = 3
 
 
 class RecommendationCache:
@@ -30,17 +39,24 @@ class RecommendationCache:
         saved: Iterable[str],
         liked: Iterable[str] = (),
         disliked: Iterable[str] = (),
+        scope: Iterable[str] = (),
     ) -> str:
         """Stable hash of a user's saved + thumbs-up + thumbs-down IDs.
 
         Order-independent within each bucket, and the bucket prefix means
         moving a book from saved to liked still produces a fresh signature.
         Any of the three changing — add, remove, flip — yields a new key.
+
+        `scope` is the subset of book IDs a recommendation was scoped to
+        (a section or an ad-hoc selection). It's hashed as its own bucket so
+        a full-library run, a section run, and a hand-picked run over the
+        same library each get distinct cache entries.
         """
-        parts: list[str] = []
+        parts: list[str] = [f"V:{CACHE_VERSION}"]
         parts.extend(f"S:{b}" for b in sorted(saved))
         parts.extend(f"U:{b}" for b in sorted(liked))
         parts.extend(f"D:{b}" for b in sorted(disliked))
+        parts.extend(f"C:{b}" for b in sorted(scope))
         return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
 
     def get(self, user_id: str, sig: str, top_n: int) -> list[dict] | None:
@@ -66,3 +82,46 @@ class RecommendationCache:
             stale = [k for k in self._store if k[0] == user_id]
             for k in stale:
                 del self._store[k]
+
+
+class TTLCache:
+    """Thread-safe LRU cache whose entries also expire after a fixed TTL.
+
+    Used for /similar results: the endpoint is anonymous (no per-user
+    invalidation hook), so entries age out instead. The TTL keeps a book's
+    "similar" list from fossilizing while still absorbing the common case of
+    several users (or one indecisive user) clicking the same book repeatedly.
+
+    `clock` is injectable for tests; production uses time.monotonic.
+    """
+
+    def __init__(
+        self,
+        max_entries: int = 256,
+        ttl_seconds: float = 3600.0,
+        clock=time.monotonic,
+    ) -> None:
+        self._store: OrderedDict[str, tuple[float, list]] = OrderedDict()
+        self._lock = Lock()
+        self._max = max_entries
+        self._ttl = ttl_seconds
+        self._clock = clock
+
+    def get(self, key: str) -> list | None:
+        with self._lock:
+            entry = self._store.get(key)
+            if entry is None:
+                return None
+            expires_at, value = entry
+            if self._clock() >= expires_at:
+                del self._store[key]
+                return None
+            self._store.move_to_end(key)
+            return list(value)
+
+    def put(self, key: str, value: list) -> None:
+        with self._lock:
+            self._store[key] = (self._clock() + self._ttl, list(value))
+            self._store.move_to_end(key)
+            while len(self._store) > self._max:
+                self._store.popitem(last=False)

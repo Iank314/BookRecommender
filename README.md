@@ -15,15 +15,29 @@
 **Recommendation quality**
 - **Series-name extraction from prose** — today, when a candidate's title carries no volume marker but the description says *"the fourth book in the Hitchhiker's Trilogy"*, the recommender drops the candidate rather than recommend a stranger to start mid-series. Better: extract the series name from phrases like *"in the X Trilogy"* / *"part of the Y series"* and run the existing `_entry_point_book` lookup against it, so book 1 gets swapped in instead of the sequel being dropped. The hard part is keeping false positives low (*"in the tradition of the X series"*, *"like the Y trilogy"*).
 - **Smarter nonfiction/homonym filtering** — catch tagless nonfiction and homonym genres (e.g. "magic" the occult topic vs. fantasy magic, "cultivation" the agriculture topic vs. the xianxia genre) by curating nonfiction subject markers and weighting specific genres over broad ones
-- **Semantic similarity (embeddings)** — sentence-embed descriptions for better "writing style" matching than token overlap (adds a model dependency, so only if token scoring plateaus)
+- **Semantic similarity (embeddings)** — sentence-embed descriptions for better "writing style" matching than token overlap. Gated: only when `python -m scripts.explain_similar "<title>"` sessions show bad recommendations driven by legitimate story vocabulary meaning different things in context (so far every bad rec has traced to data quality or normalization, all fixable in token land — see CLAUDE.md "Recommendation quality tuning")
+
+**Search coverage & data sources**
+
+The app currently searches **Google Books + Open Library** (see [fetcher.py](server/fetcher/fetcher.py)). Adding a source is a clean extension: an endpoint constant, a `_fetch_X` method, a `_from_X_item` → `Books` mapper, and one wiring change in the `/search` provider loop. Ranked by effort-to-payoff:
+
+- **Set `GOOGLE_BOOKS_API_KEY` first (free, zero code, biggest win).** Unauthenticated, the fetcher caps Google at 3 concurrent requests and trips a 60s cooldown the moment Google 429s — which happens constantly, so Open Library carries most of every search. A free key (Google Cloud Console → enable the Books API) removes that ceiling and is what was starving the webnovel lookups (e.g. Shadow Slave). Do this and measure before adding any new source — more sources just multiply dedup work and latency for marginal recall if Google is still throttled.
+- **ISBNdb (paid, ~$15–50/mo) — best single upgrade if budget allows.** Highest-quality metadata and ISBN coverage of any option. Clean REST API. Won't help web serials specifically (see the gap note below).
+- **Hardcover (free, GraphQL) — modern/popular titles, Goodreads-like.** Requires a free account token; verify current API access/terms before building (it was early-stage as of early 2026).
+- **NYT Books API (free) — a popularity *signal*, not a search backend.** Bestseller lists only; useful to strengthen the popularity tiebreaker in scoring, not to widen raw search recall.
+- **Penguin Random House (free key) — high-quality but narrow** (their catalog only).
+
+**Dead ends — don't sink time here:**
+- **Goodreads:** API discontinued for new developers in **December 2020**; existing keys stopped working too. There is no supported Goodreads API. (The app uses *Google Books*, not Goodreads — don't confuse the two.)
+- **Amazon / Kindle:** the Product Advertising API (PA-API 5.0) requires an Amazon Associates account *with qualifying sales* to keep access, is hard rate-limited (~1 req/sec), and its ToS **prohibits caching results or building a competing catalog** — exactly what this app does. Not viable.
+
+**Structural gap to set expectations:** webnovels and light novels (Shadow Slave, most Royal Road / xianxia serials) have **no metadata in any mainstream book API** until a print/Kindle edition gets cataloged — which Google Books *does* eventually pick up (another reason for the key). ISBNdb won't fix this either; it's a data-availability limit, not an integration one. The `MIN_SIMILAR_SCORE` floor already makes these cases return an honest empty result instead of one wrong book.
 
 **Robustness & polish**
 - **Verify Google Books end-to-end with an API key** — confirm Google actually contributes results (unauthenticated testing keeps hitting the rate limit and falling back to Open Library)
 - **Litestream backup for the self-hosted DB** — replicate `data/library.db` continuously to a free Cloudflare R2 or Backblaze B2 bucket, so a disk failure on the host doesn't lose every account. ~1 hour to wire up; turns the current single-disk SPOF into recoverable state without changing the SQLite story.
-- **Stale-cache busting on display-layer changes** — the in-process rec cache keys on `(user, library_signature, top_n)` but not on backend code version, so a deploy that changes `_to_out` or `_clean_tags_for_display` lets stale cached payloads outlive the upgrade. Adding a small `CACHE_VERSION` constant to the signature would force a clean re-score after each release.
 
 **Product**
-- **Reading status** — want-to-read / reading / read on library books, and recommend from only the "read" ones
 - **Account management** — password reset and email verification (currently username + password only)
 - **Per-IP rate limiting** — the login throttle is per-username, which targets credential stuffing but lets a single attacker spread guesses across many usernames. A per-IP layer on top, once we're behind Cloudflare's `CF-Connecting-IP` header, closes that gap.
 
@@ -56,9 +70,9 @@ A full-stack book recommendation system that searches **Google Books** and **Ope
 - Paginated results (20 per page) with relevance badges
 
 ### Content-Based Recommendations
-- **Similar books**: given a book, fetches candidates matching its genres and ranks them by IDF-weighted token-set similarity (plain cosine collapsed across the differing vocabularies of Google Books and Open Library)
+- **Similar books**: given a book, fetches candidates matching its genres and scores them with the same blend as library recommendations — genre-tag overlap ⊕ IDF-weighted description similarity — including tagless-candidate enrichment, the fiction/nonfiction filter, and mid-series-sequel dropping (plain cosine collapsed across the differing vocabularies of Google Books and Open Library, so token-set scoring is used instead)
 - **Library-based recommendations**: fetches candidates across your library's genres and scores each one against your closest saved book by blending a **genre-overlap score** with a **description-similarity score** — falling back to description-only when a candidate has no genre tags
-- **Thumbs up / thumbs down**: any book you 👍 or 👎 becomes a recommendation signal — candidates similar (IDF-weighted token-set F1) to thumbs-up books are nudged up, similar to thumbs-down books are nudged down (multiplicative modifier, clamped so a single signal can't fully override the genre/description match). Thumbs-down books are also removed from candidate pools entirely so they can't slip back via a different edition
+- **Thumbs up / thumbs down**: any book you 👍 or 👎 becomes a recommendation signal — candidates similar (IDF-weighted token-set F1) to thumbs-up books are nudged up, similar to thumbs-down books are nudged down (multiplicative modifier, clamped so a single signal can't fully override the genre/description match). Both liked and disliked books are removed from candidate pools entirely — a 👍 book re-weights what gets recommended but is never recommended back itself, and neither can slip back in via a different edition
 - **Open Library enrichment**: candidates that arrive without genres have their subjects and full description back-filled from Open Library's work-detail endpoint, so they can be judged on genre, not text alone
 - **Language matching**: recommendations are limited to the language(s) of the source — your library's languages for library recs, the clicked book's language for "Find Similar" (detected from each book's title script) — so an all-English request won't surface Russian, Japanese, Korean, or Chinese editions
 - **Fiction/nonfiction filter**: when your library is fiction, nonfiction candidates (how-tos, histories, biographies) are dropped so they can't match on shared theme words like "magic" or "combat"
@@ -66,7 +80,8 @@ A full-stack book recommendation system that searches **Google Books** and **Ope
 - **Diversity**: caps how many recommendations come from any single saved book and any single author, so one genre or author can't flood the list
 - **Popularity as tiebreaker only**: popularity scales a match's score by at most a few percent, so a hugely popular off-genre book can't outrank a genuine match
 - **Detail caching**: a book's genres, description, and language are captured when you save it (sparse Open Library entries are enriched), so recommendations don't re-fetch the same data later
-- **Recommendation caching**: results for an unchanged library are kept in an in-process LRU cache keyed by a hash spanning saved + liked + disliked book IDs, so repeat calls return instantly without re-fetching or re-scoring; any add/remove/flip in either set produces a fresh key and the user's prior cache entries are evicted eagerly
+- **Recommendation caching**: results for an unchanged library are kept in an in-process LRU cache keyed by a hash spanning saved + liked + disliked book IDs (plus a `CACHE_VERSION` constant, so payloads cached by older code die on deploy), so repeat calls return instantly without re-fetching or re-scoring; any add/remove/flip in either set produces a fresh key and the user's prior cache entries are evicted eagerly
+- **"Find Similar" caching**: similar-book results are kept in a 1-hour TTL LRU cache keyed on the source book's identity, so repeat clicks on the same book — by anyone, it's an anonymous endpoint — skip the fetch + score pipeline entirely
 
 ### Accounts & Personal Library
 - Register / log in with a username and password (passwords stored salted + PBKDF2-hashed)
@@ -74,7 +89,9 @@ A full-stack book recommendation system that searches **Google Books** and **Ope
 - Search and "Find Similar" are open to everyone; saving, recording feedback, and library recommendations require logging in
 - Save and remove books (genres, description, and language are captured on save); view your collection in a dedicated tab
 - Three views in the library tab — **Saved** (your collection), **Liked** (thumbs-up signals), **Disliked** (thumbs-down signals) — each independently manageable
-- Get recommendations based on your full saved collection, re-ranked by any feedback you've recorded
+- **Sections**: organize saved books into named shelves ("Sci-fi favorites", "Cozy reads") — a book can live in any number of sections, and removing it from the library removes it from its sections too
+- **Reading status**: mark saved books 📥 want-to-read / 📖 reading / ✅ read — statuses appear as built-in shelves next to your sections, so you can browse just your "Read" books and get recommendations from only those
+- Get recommendations based on your full saved collection, **one section**, or an **ad-hoc checkbox selection of books** — scoped runs build their genre/language profile from just those books, while still never recommending back anything you've already saved anywhere; all re-ranked by any feedback you've recorded
 - Failed logins are throttled per-username (5 attempts / 60s window) to blunt credential-stuffing attempts
 - Session cookies are `HttpOnly`, `SameSite=Lax`, and `Secure` in production (toggle with `BOOKREC_SECURE_COOKIES=true` when serving over HTTPS)
 
@@ -163,7 +180,8 @@ BookRecommender/
 ├── data/
 │   └── library.db          SQLite database (accounts, sessions, libraries) — created on first run
 ├── scripts/
-│   └── demo_query.py       CLI demo
+│   ├── demo_query.py       CLI demo
+│   └── explain_similar.py  Tuning tool: score breakdown for "Find Similar"
 ├── tests/
 │   ├── test_auth_throttle.py
 │   ├── test_engine.py
@@ -194,7 +212,14 @@ BookRecommender/
 | `GET` | `/library/feedback` | session | List the account's thumbs-up / down books (`?kind=up` or `?kind=down` to filter) |
 | `POST` | `/library/feedback` | session | Record thumbs-up / down on a book |
 | `DELETE` | `/library/feedback/{book_id}` | session | Clear feedback on a book |
-| `POST` | `/library/recommend` | session | Recommendations based on the saved library + feedback |
+| `GET` | `/library/sections` | session | List sections (each with its member book IDs) |
+| `POST` | `/library/sections` | session | Create a section (`{"name": ...}`, 409 on duplicate) |
+| `PATCH` | `/library/sections/{id}` | session | Rename a section |
+| `DELETE` | `/library/sections/{id}` | session | Delete a section (books stay in the library) |
+| `POST` | `/library/sections/{id}/books` | session | Add a saved book to a section (`{"book_id": ...}`); include `"from_section_id"` to atomically move it out of another section instead |
+| `DELETE` | `/library/sections/{id}/books/{book_id}` | session | Remove a book from a section |
+| `POST` | `/library/status` | session | Set or clear a saved book's reading status (`{"book_id": ..., "status": "want_to_read" \| "reading" \| "read" \| null}`) |
+| `POST` | `/library/recommend` | session | Recommendations based on the saved library + feedback; optional body `{"section_id": ...}` or `{"book_ids": [...]}` scopes the run to a section or a hand-picked selection |
 
 Session-gated endpoints require a valid `bookrec_session` cookie (set on register/login) and return `401` otherwise.
 

@@ -14,6 +14,7 @@ const searchBar  = document.querySelector(".search-bar");
 
 // Auth elements
 const authStatus    = document.getElementById("auth-status");
+const adminStatsBtn = document.getElementById("admin-stats-btn");
 const authLoginBtn  = document.getElementById("auth-login-btn");
 const authLogoutBtn = document.getElementById("auth-logout-btn");
 const authModal     = document.getElementById("auth-modal");
@@ -34,7 +35,31 @@ let totalPages = 0;
 let viewMode = "search"; // "search" | "library"
 let libraryView = "saved"; // "saved" | "liked" | "disliked"
 let currentUser = null;  // username string when logged in, else null
+let currentIsAdmin = false;
 let authMode = "login";  // "login" | "register"
+
+// Sections state (saved view only). `sections` mirrors GET /library/sections,
+// `activeSectionId` filters the saved view (null = all books), and
+// `selectedBookIds` drives "recommend from these picked books".
+let sections = [];            // [{id, name, book_ids}]
+let activeSectionId = null;
+let activeStatus = null;      // "want_to_read" | "reading" | "read" | null
+let selectedBookIds = new Set();
+let selectedBar = null;       // "Recommend from N selected" bar, re-created per render
+// Local mirror of the saved view, so status/section changes can update chips
+// and headings in place instead of refetching and re-rendering everything
+// (which collapsed expanded cards and jumped the scroll position).
+let libraryBooks = [];
+let currentTitleLabel = "";
+let currentViewCount = 0;
+
+// Reading statuses render as built-in chips alongside user sections; a book
+// has at most one status (exclusive), unlike sections (many-to-many).
+const READING_STATUSES = [
+  { key: "want_to_read", label: "Want to Read", emoji: "📥" },
+  { key: "reading",      label: "Reading",      emoji: "📖" },
+  { key: "read",         label: "Read",         emoji: "✅" },
+];
 
 const placeholders = {
   title:  "Search by title... e.g. Harry Potter",
@@ -67,9 +92,17 @@ tabs.forEach((tab) => {
 async function checkAuth() {
   try {
     const res = await fetch(`${API}/auth/me`);
-    currentUser = res.ok ? (await res.json()).username : null;
+    if (res.ok) {
+      const data = await res.json();
+      currentUser = data.username;
+      currentIsAdmin = !!data.is_admin;
+    } else {
+      currentUser = null;
+      currentIsAdmin = false;
+    }
   } catch {
     currentUser = null;
+    currentIsAdmin = false;
   }
   renderAuthBar();
 }
@@ -84,6 +117,7 @@ function renderAuthBar() {
     authLoginBtn.classList.remove("hidden");
     authLogoutBtn.classList.add("hidden");
   }
+  adminStatsBtn.classList.toggle("hidden", !(currentUser && currentIsAdmin));
 }
 
 function openAuth(mode = "login") {
@@ -136,6 +170,7 @@ authForm.addEventListener("submit", async (e) => {
     const data = await res.json().catch(() => null);
     if (!res.ok) throw new Error(data?.detail || "Authentication failed");
     currentUser = data.username;
+    currentIsAdmin = !!data.is_admin;
     renderAuthBar();
     closeAuth();
     if (activeCategory === "library") loadLibrary();
@@ -150,9 +185,107 @@ authForm.addEventListener("submit", async (e) => {
 authLogoutBtn.addEventListener("click", async () => {
   try { await fetch(`${API}/auth/logout`, { method: "POST" }); } catch {}
   currentUser = null;
+  currentIsAdmin = false;
   renderAuthBar();
   if (activeCategory === "library") loadLibrary();
 });
+
+// ---- Admin stats ----
+
+adminStatsBtn.addEventListener("click", async () => {
+  showLoading("Loading stats...");
+  try {
+    const res = await fetch(`${API}/admin/stats`);
+    if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || "Failed to load stats");
+    renderAdminStats(await res.json());
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    hideLoading();
+  }
+});
+
+function renderAdminStats(data) {
+  container.innerHTML = "";
+  pagination.classList.add("hidden");
+  heading.textContent = `Admin stats — ${data.accounts_total} account${data.accounts_total === 1 ? "" : "s"}`;
+
+  const ago = (ts) => {
+    if (!ts) return "—";
+    const s = data.now - ts;
+    if (s < 3600) return `${Math.max(1, Math.round(s / 60))}m ago`;
+    if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+    return `${Math.round(s / 86400)}d ago`;
+  };
+  const n = (obj, key) => (obj && obj[key]) || 0;
+
+  // Summary cards: activity by kind over 24h / 7d / all-time.
+  const cards = document.createElement("div");
+  cards.className = "stats-cards";
+  const a24 = data.activity.last_24h, a7 = data.activity.last_7d, all = data.activity.all_time;
+  const spec = [
+    [`${data.active_users.last_24h} / ${data.active_users.last_7d}`, "Active users (24h / 7d)"],
+    [`${n(a24, "search")} / ${n(a7, "search")} / ${n(all, "search")}`, "Searches (24h / 7d / all)"],
+    [`${n(a24, "similar")} / ${n(a7, "similar")} / ${n(all, "similar")}`, "Find Similar (24h / 7d / all)"],
+    [`${n(a24, "recommend")} / ${n(a7, "recommend")} / ${n(all, "recommend")}`, "Recommendations (24h / 7d / all)"],
+    [`${data.anonymous_events.last_24h} / ${data.anonymous_events.last_7d}`, "Anonymous events (24h / 7d)"],
+  ];
+  for (const [value, label] of spec) {
+    const card = document.createElement("div");
+    card.className = "stats-card";
+    const v = document.createElement("div");
+    v.className = "stats-value";
+    v.textContent = value;
+    const l = document.createElement("div");
+    l.className = "stats-label";
+    l.textContent = label;
+    card.appendChild(v);
+    card.appendChild(l);
+    cards.appendChild(card);
+  }
+  container.appendChild(cards);
+
+  // Accounts table.
+  const table = document.createElement("table");
+  table.className = "stats-table";
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const h of ["Username", "Registered", "Books saved", "Last active"]) {
+    const th = document.createElement("th");
+    th.textContent = h;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  for (const acct of data.accounts) {
+    const tr = document.createElement("tr");
+    const cells = [
+      acct.username + (acct.is_admin ? " 👑" : ""),
+      ago(acct.created_at),
+      String(acct.books_saved),
+      ago(acct.last_active),
+    ];
+    for (const text of cells) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  container.appendChild(table);
+
+  const note = document.createElement("p");
+  note.className = "library-hint";
+  note.textContent = "Activity tracking counts searches (first page only), Find Similar clicks, "
+    + "and recommendation runs. Events started being recorded when this feature was deployed; "
+    + "\"Last active\" reflects tracked events only.";
+  container.appendChild(note);
+
+  results.classList.remove("hidden");
+}
 
 checkAuth();
 
@@ -224,10 +357,14 @@ async function loadLibrary() {
     if (libraryView === "saved") url = `${API}/library`;
     else url = `${API}/library/feedback?kind=${libraryView === "liked" ? "up" : "down"}`;
 
-    const res = await fetch(url);
+    const [res, secRes] = await Promise.all([
+      fetch(url),
+      libraryView === "saved" ? fetch(`${API}/library/sections`) : Promise.resolve(null),
+    ]);
     if (res.status === 401) { currentUser = null; renderAuthBar(); renderLoginPrompt(); return; }
     if (!res.ok) throw new Error("Failed to load library");
     const books = await res.json();
+    if (secRes && secRes.ok) sections = await secRes.json();
     renderLibrary(books, labels[libraryView]);
   } catch (err) {
     showError(err.message);
@@ -259,9 +396,11 @@ function renderLoginPrompt() {
 function renderLibrary(books, label) {
   container.innerHTML = "";
   pagination.classList.add("hidden");
+  selectedBookIds.clear();
+  selectedBar = null;
 
   // View switcher: Saved / Liked / Disliked. Clicking refetches the chosen
-  // section. Active state is purely visual; libraryView is the source of truth.
+  // view. Active state is purely visual; libraryView is the source of truth.
   const tabs = document.createElement("div");
   tabs.className = "library-views";
   const switcherSpec = [
@@ -282,37 +421,384 @@ function renderLibrary(books, label) {
   }
   container.appendChild(tabs);
 
-  if (books.length === 0) {
-    heading.textContent = `${label} (0 books)`;
+  // Section/status bar + filtering (saved view only). The active section may
+  // have been deleted since the last render — fall back to All Books. Section
+  // and status filters are mutually exclusive (picking one clears the other).
+  let viewBooks = books;
+  let activeSection = null;
+  let statusInfo = null;
+  if (libraryView === "saved") {
+    libraryBooks = books;
+    activeSection = sections.find((s) => s.id === activeSectionId) || null;
+    if (!activeSection) activeSectionId = null;
+    statusInfo = READING_STATUSES.find((s) => s.key === activeStatus) || null;
+    if (!statusInfo) activeStatus = null;
+    container.appendChild(renderSectionBar(books));
+    if (activeSection) {
+      const memberIds = new Set(activeSection.book_ids);
+      viewBooks = books.filter((b) => memberIds.has(b.id));
+    } else if (statusInfo) {
+      viewBooks = books.filter((b) => b.reading_status === statusInfo.key);
+    }
+  }
+
+  const titleLabel = activeSection
+    ? `${activeSection.name}`
+    : statusInfo
+      ? `${statusInfo.emoji} ${statusInfo.label}`
+      : label;
+  currentTitleLabel = titleLabel;
+  currentViewCount = viewBooks.length;
+
+  if (viewBooks.length === 0) {
+    heading.textContent = `${titleLabel} (0 books)`;
     const hint = document.createElement("p");
     hint.className = "library-hint";
-    hint.textContent = libraryView === "saved"
-      ? 'Search for books and click "Save to Library" to build your collection.'
-      : libraryView === "liked"
-        ? "Books you give a 👍 will appear here and boost similar recommendations."
-        : "Books you give a 👎 will appear here and suppress similar recommendations.";
+    hint.textContent = activeSection
+      ? 'This section is empty. View All Books and use "Add to section…" on a book.'
+      : statusInfo
+        ? `No books marked "${statusInfo.label}" yet. Use the Status dropdown on a saved book.`
+        : libraryView === "saved"
+        ? 'Search for books and click "Save to Library" to build your collection.'
+        : libraryView === "liked"
+          ? "Books you give a 👍 will appear here and boost similar recommendations."
+          : "Books you give a 👎 will appear here and suppress similar recommendations.";
     container.appendChild(hint);
     results.classList.remove("hidden");
     return;
   }
 
-  heading.textContent = `${label} (${books.length} books)`;
+  heading.textContent = `${titleLabel} (${viewBooks.length} books)`;
 
   // Recommend button only makes sense on the saved view — feedback alone
-  // can't drive recs without a base library.
+  // can't drive recs without a base library. A selected section scopes the
+  // recommendation to just its books.
   if (libraryView === "saved") {
     const recBtn = document.createElement("button");
     recBtn.className = "recommend-btn";
-    recBtn.textContent = "Get Recommendations Based on My Library";
-    recBtn.addEventListener("click", getLibraryRecommendations);
+    recBtn.textContent = activeSection
+      ? `Get Recommendations from "${activeSection.name}"`
+      : statusInfo
+        ? `Get Recommendations from "${statusInfo.label}" Books`
+        : "Get Recommendations Based on My Library";
+    // Status filters scope through book_ids — the backend doesn't need to
+    // know about statuses, and the cache signature already covers the scope.
+    const scopedIds = viewBooks.map((b) => b.id);
+    recBtn.addEventListener("click", () => {
+      if (activeSection) {
+        getLibraryRecommendations({ section_id: activeSection.id }, activeSection.name);
+      } else if (statusInfo) {
+        getLibraryRecommendations({ book_ids: scopedIds }, `your "${statusInfo.label}" books`);
+      } else {
+        getLibraryRecommendations(null, null);
+      }
+    });
     container.appendChild(recBtn);
+
+    // "Recommend from N selected" bar — hidden until a checkbox is ticked.
+    selectedBar = document.createElement("button");
+    selectedBar.className = "recommend-btn selected-bar hidden";
+    selectedBar.addEventListener("click", () => {
+      if (selectedBookIds.size === 0) return;
+      getLibraryRecommendations(
+        { book_ids: [...selectedBookIds] },
+        `${selectedBookIds.size} selected book${selectedBookIds.size > 1 ? "s" : ""}`,
+      );
+    });
+    container.appendChild(selectedBar);
   }
 
   // The Remove action differs by view: saved → DELETE /library/{id},
   // liked/disliked → DELETE /library/feedback/{id}.
   const removeAction = libraryView === "saved" ? removeFromLibrary : removeFeedback;
-  renderBookList(books, 0, { showRemove: true, removeAction });
+  renderBookList(viewBooks, 0, {
+    showRemove: true,
+    removeAction,
+    sectionControls: libraryView === "saved",
+    activeSection,
+  });
   results.classList.remove("hidden");
+}
+
+// ---- Sections ----
+
+function renderSectionBar(books) {
+  const bar = document.createElement("div");
+  bar.className = "section-bar";
+
+  const allChip = document.createElement("button");
+  allChip.className = "section-chip"
+    + (activeSectionId === null && activeStatus === null ? " active" : "");
+  allChip.textContent = `All Books (${books.length})`;
+  allChip.addEventListener("click", () => {
+    if (activeSectionId === null && activeStatus === null) return;
+    activeSectionId = null;
+    activeStatus = null;
+    loadLibrary();
+  });
+  bar.appendChild(allChip);
+
+  // Built-in reading-status chips — same affordance as sections, but driven
+  // by each book's exclusive reading_status instead of memberships.
+  for (const status of READING_STATUSES) {
+    const count = books.filter((b) => b.reading_status === status.key).length;
+    const chip = document.createElement("button");
+    chip.className = "section-chip section-builtin"
+      + (activeStatus === status.key ? " active" : "");
+    chip.textContent = `${status.emoji} ${status.label} (${count})`;
+    chip.addEventListener("click", () => {
+      if (activeStatus === status.key) return;
+      activeStatus = status.key;
+      activeSectionId = null;
+      loadLibrary();
+    });
+    bar.appendChild(chip);
+  }
+
+  for (const section of sections) {
+    const chip = document.createElement("button");
+    chip.className = "section-chip" + (activeSectionId === section.id ? " active" : "");
+    chip.textContent = `${section.name} (${section.book_ids.length})`;
+    chip.addEventListener("click", () => {
+      if (activeSectionId === section.id) return;
+      activeSectionId = section.id;
+      activeStatus = null;
+      loadLibrary();
+    });
+    bar.appendChild(chip);
+  }
+
+  const newBtn = document.createElement("button");
+  newBtn.className = "section-chip section-new";
+  newBtn.textContent = "+ New Section";
+  newBtn.addEventListener("click", async () => {
+    const name = prompt("Section name (e.g. Sci-fi favorites):");
+    if (!name || !name.trim()) return;
+    const created = await createSection(name.trim());
+    if (created) { activeSectionId = created.id; loadLibrary(); }
+  });
+  bar.appendChild(newBtn);
+
+  // Rename / delete controls for the open section.
+  const active = sections.find((s) => s.id === activeSectionId);
+  if (active) {
+    const renameBtn = document.createElement("button");
+    renameBtn.className = "section-chip section-manage";
+    renameBtn.textContent = "Rename";
+    renameBtn.addEventListener("click", async () => {
+      const name = prompt(`Rename "${active.name}" to:`, active.name);
+      if (!name || !name.trim() || name.trim() === active.name) return;
+      if (await renameSection(active.id, name.trim())) loadLibrary();
+    });
+    bar.appendChild(renameBtn);
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.className = "section-chip section-manage section-delete";
+    deleteBtn.textContent = "Delete";
+    deleteBtn.addEventListener("click", async () => {
+      if (!confirm(`Delete the section "${active.name}"? Books stay in your library.`)) return;
+      if (await deleteSection(active.id)) { activeSectionId = null; loadLibrary(); }
+    });
+    bar.appendChild(deleteBtn);
+  }
+
+  return bar;
+}
+
+// In-place refresh helpers — status/section changes update the chip bar and
+// heading without refetching, so expanded cards and scroll position survive.
+function refreshSectionBar() {
+  if (libraryView !== "saved") return;
+  const old = container.querySelector(".section-bar");
+  if (old) old.replaceWith(renderSectionBar(libraryBooks));
+}
+
+function removeCardFromView(card) {
+  const group = card.closest(".genre-section");
+  card.remove();
+  if (group && !group.querySelector(".book-card")) group.remove();
+  currentViewCount -= 1;
+  heading.textContent = `${currentTitleLabel} (${currentViewCount} books)`;
+}
+
+// Reading-status dropdown on saved-book cards. Selecting the current status
+// again is a no-op; "No status" clears it.
+function buildStatusSelect(book, card) {
+  const select = document.createElement("select");
+  select.className = "section-select";
+  const placeholder = document.createElement("option");
+  placeholder.value = "__none__";
+  placeholder.textContent = book.reading_status ? "No status" : "Status…";
+  select.appendChild(placeholder);
+  for (const status of READING_STATUSES) {
+    const opt = document.createElement("option");
+    opt.value = status.key;
+    opt.textContent = `${status.emoji} ${status.label}`;
+    select.appendChild(opt);
+  }
+  if (book.reading_status) select.value = book.reading_status;
+  select.addEventListener("click", (e) => e.stopPropagation());
+  select.addEventListener("change", async (e) => {
+    e.stopPropagation();
+    const value = select.value === "__none__" ? null : select.value;
+    if (value === (book.reading_status || null)) return;
+    if (!(await setReadingStatus(book.id, value))) {
+      select.value = book.reading_status || "__none__";
+      return;
+    }
+    // Update local state in place — no refetch, no re-render.
+    book.reading_status = value;
+    const original = libraryBooks.find((b) => b.id === book.id);
+    if (original) original.reading_status = value;
+    placeholder.textContent = value ? "No status" : "Status…";
+    // Inside a status shelf, a book whose status changed no longer belongs.
+    if (activeStatus && value !== activeStatus) removeCardFromView(card);
+    refreshSectionBar();
+  });
+  return select;
+}
+
+async function setReadingStatus(bookId, status) {
+  try {
+    const res = await fetch(`${API}/library/status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ book_id: bookId, status }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// Dropdown used on saved-book cards. currentSection null → "Add to section…"
+// (plain add, a book can sit in several sections); set → "Move to section…"
+// (atomic add-to-target + remove-from-current on the server).
+function buildSectionSelect(book, currentSection, card) {
+  const select = document.createElement("select");
+  select.className = "section-select";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = currentSection ? "Move to section…" : "Add to section…";
+  select.appendChild(placeholder);
+  for (const s of sections) {
+    if (currentSection && s.id === currentSection.id) continue; // already here
+    const opt = document.createElement("option");
+    opt.value = String(s.id);
+    opt.textContent = s.book_ids.includes(book.id) ? `${s.name} ✓` : s.name;
+    if (s.book_ids.includes(book.id)) opt.disabled = true;
+    select.appendChild(opt);
+  }
+  const newOpt = document.createElement("option");
+  newOpt.value = "__new__";
+  newOpt.textContent = "+ New section…";
+  select.appendChild(newOpt);
+  select.addEventListener("click", (e) => e.stopPropagation());
+  select.addEventListener("change", async (e) => {
+    e.stopPropagation();
+    const value = select.value;
+    select.value = "";
+    if (!value) return;
+    let sectionId = value;
+    if (value === "__new__") {
+      const name = prompt("Section name (e.g. Sci-fi favorites):");
+      if (!name || !name.trim()) return;
+      const created = await createSection(name.trim());
+      if (!created) return;
+      sections.push(created);
+      sectionId = created.id;
+    }
+    const ok = await addBookToSection(
+      Number(sectionId), book.id, currentSection ? currentSection.id : null,
+    );
+    if (!ok) return;
+    // Update local membership and just the affected DOM — no refetch.
+    const target = sections.find((s) => s.id === Number(sectionId));
+    if (target && !target.book_ids.includes(book.id)) target.book_ids.push(book.id);
+    if (currentSection) {
+      const cur = sections.find((s) => s.id === currentSection.id);
+      if (cur) cur.book_ids = cur.book_ids.filter((id) => id !== book.id);
+      removeCardFromView(card); // it moved out of the shelf being viewed
+    } else {
+      select.replaceWith(buildSectionSelect(book, currentSection, card)); // show the ✓
+    }
+    refreshSectionBar();
+  });
+  return select;
+}
+
+function updateSelectedBar() {
+  if (!selectedBar) return;
+  const n = selectedBookIds.size;
+  selectedBar.textContent = `Get Recommendations from ${n} Selected Book${n === 1 ? "" : "s"}`;
+  selectedBar.classList.toggle("hidden", n === 0);
+}
+
+async function createSection(name) {
+  try {
+    const res = await fetch(`${API}/library/sections`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) { showError(data?.detail || "Failed to create section"); return null; }
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+async function renameSection(sectionId, name) {
+  try {
+    const res = await fetch(`${API}/library/sections/${sectionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      showError(data?.detail || "Failed to rename section");
+    }
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function deleteSection(sectionId) {
+  try {
+    const res = await fetch(`${API}/library/sections/${sectionId}`, { method: "DELETE" });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// fromSectionId null = plain add; set = atomic move out of that section.
+async function addBookToSection(sectionId, bookId, fromSectionId = null) {
+  try {
+    const res = await fetch(`${API}/library/sections/${sectionId}/books`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ book_id: bookId, from_section_id: fromSectionId }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function removeBookFromSection(sectionId, bookId) {
+  try {
+    const res = await fetch(
+      `${API}/library/sections/${sectionId}/books/${encodeURIComponent(bookId)}`,
+      { method: "DELETE" },
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 async function saveToLibrary(book) {
@@ -370,13 +856,24 @@ async function removeFeedback(bookId) {
   }
 }
 
-async function getLibraryRecommendations() {
-  showLoading("Analyzing your library and finding recommendations...");
+async function getLibraryRecommendations(scope = null, scopeLabel = null) {
+  // scope: null (whole library), {section_id} or {book_ids} \u2014 mirrors the
+  // optional body /library/recommend accepts.
+  showLoading(
+    scopeLabel
+      ? `Finding recommendations based on ${scopeLabel}...`
+      : "Analyzing your library and finding recommendations...",
+  );
   try {
-    const res = await fetch(`${API}/library/recommend?top_n=20`, { method: "POST" });
+    const res = await fetch(`${API}/library/recommend?top_n=20`, {
+      method: "POST",
+      ...(scope
+        ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(scope) }
+        : {}),
+    });
     if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || "Recommendation failed");
     const books = await res.json();
-    renderLibraryRecommendations(books);
+    renderLibraryRecommendations(books, scopeLabel);
   } catch (err) {
     showError(err.message);
   } finally {
@@ -384,7 +881,7 @@ async function getLibraryRecommendations() {
   }
 }
 
-function renderLibraryRecommendations(books) {
+function renderLibraryRecommendations(books, scopeLabel = null) {
   container.innerHTML = "";
   pagination.classList.add("hidden");
 
@@ -401,7 +898,9 @@ function renderLibraryRecommendations(books) {
     return;
   }
 
-  heading.textContent = `Recommended for you (${books.length} books)`;
+  heading.textContent = scopeLabel
+    ? `Recommended based on ${scopeLabel} (${books.length} books)`
+    : `Recommended for you (${books.length} books)`;
   renderBookList(books, 0);
   results.classList.remove("hidden");
 }
@@ -415,7 +914,7 @@ async function findSimilar(book) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        title: book.title, authors: book.authors,
+        id: book.id || "", title: book.title, authors: book.authors,
         description: book.description || "", tags: book.tags, top_n: 20,
       }),
     });
@@ -611,6 +1110,29 @@ function createCard(book, options = {}) {
     actions.appendChild(saveBtn);
   }
 
+  // Section controls (saved library view only). In All Books: a dropdown to
+  // file the book into a section. Inside a section: a dropdown to MOVE it to
+  // a different section, plus a button to drop it from the current one.
+  if (options.sectionControls) {
+    const current = options.activeSection || null;
+    actions.appendChild(buildStatusSelect(book, card));
+    actions.appendChild(buildSectionSelect(book, current, card));
+    if (current) {
+      const sectionRemoveBtn = document.createElement("button");
+      sectionRemoveBtn.className = "remove-btn";
+      sectionRemoveBtn.textContent = `Remove from "${current.name}"`;
+      sectionRemoveBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (!(await removeBookFromSection(current.id, book.id))) return;
+        const cur = sections.find((s) => s.id === current.id);
+        if (cur) cur.book_ids = cur.book_ids.filter((id) => id !== book.id);
+        removeCardFromView(card);
+        refreshSectionBar();
+      });
+      actions.appendChild(sectionRemoveBtn);
+    }
+  }
+
   // Remove button — wired to whatever action the caller passed
   // (removeFromLibrary for saved, removeFeedback for liked/disliked).
   if (options.showRemove) {
@@ -693,6 +1215,23 @@ function createCard(book, options = {}) {
     toggle.textContent = open ? "\u25BC" : "\u25B2";
     card.classList.toggle("expanded", !open);
   });
+
+  // Selection checkbox for "recommend from these picked books" — visible
+  // without expanding the card, saved library view only.
+  if (options.sectionControls) {
+    const selectBox = document.createElement("input");
+    selectBox.type = "checkbox";
+    selectBox.className = "select-box";
+    selectBox.title = "Select for recommendations";
+    selectBox.checked = selectedBookIds.has(book.id);
+    selectBox.addEventListener("click", (e) => e.stopPropagation());
+    selectBox.addEventListener("change", () => {
+      if (selectBox.checked) selectedBookIds.add(book.id);
+      else selectedBookIds.delete(book.id);
+      updateSelectedBar();
+    });
+    card.appendChild(selectBox);
+  }
 
   card.appendChild(rank);
   card.appendChild(info);

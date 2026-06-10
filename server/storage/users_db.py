@@ -83,6 +83,12 @@ class UserStore:
             conn.execute("PRAGMA journal_mode = WAL")
             conn.execute("PRAGMA synchronous = NORMAL")
             conn.executescript(_SCHEMA)
+            # Migration for DBs created before the admin flag existed.
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
+            if "is_admin" not in cols:
+                conn.execute(
+                    "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
+                )
             conn.commit()
         finally:
             conn.close()
@@ -119,6 +125,41 @@ class UserStore:
                 "SELECT username FROM users WHERE user_id = ?", (user_id,)
             ).fetchone()
         return row["username"] if row else None
+
+    # ------------------------------------------------------------------ #
+    # Admin — granted via scripts/make_admin.py only, never from the web,
+    # so a compromised session can't escalate itself.
+    # ------------------------------------------------------------------ #
+    def is_admin(self, user_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT is_admin FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+        return bool(row and row["is_admin"])
+
+    def set_admin(self, username: str, flag: bool) -> bool:
+        """Grant/revoke admin by username. False if no such account."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE users SET is_admin = ? WHERE username = ? COLLATE NOCASE",
+                (1 if flag else 0, username),
+            )
+            return cur.rowcount > 0
+
+    def list_accounts(self) -> list[dict]:
+        """All accounts (no password hashes), newest first — admin stats only."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT user_id, username, created_at, is_admin
+                FROM users ORDER BY created_at DESC
+                """
+            ).fetchall()
+        return [
+            {"user_id": r["user_id"], "username": r["username"],
+             "created_at": r["created_at"], "is_admin": bool(r["is_admin"])}
+            for r in rows
+        ]
 
     def create_session(self, user_id: str) -> str:
         token = secrets.token_urlsafe(32)
