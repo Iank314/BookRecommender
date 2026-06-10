@@ -6,12 +6,13 @@
   <title>Book Recommender</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📚</text></svg>" />
   <!-- ?v= busts browser caches on deploy — bump it whenever app.js/style.css change. -->
-  <link rel="stylesheet" href="/static/style.css?v=8" />
+  <link rel="stylesheet" href="/static/style.css?v=10" />
 </head>
 <body>
   <header>
     <div id="auth-bar">
       <span id="auth-status"></span>
+      <button type="button" id="theme-toggle" class="auth-btn" title="Toggle light/dark mode">☀️</button>
       <button type="button" id="admin-stats-btn" class="auth-btn hidden">📊 Stats</button>
       <button type="button" id="auth-login-btn" class="auth-btn hidden">Log in</button>
       <button type="button" id="auth-logout-btn" class="auth-btn hidden">Log out</button>
@@ -36,6 +37,13 @@
           autocomplete="off"
         />
         <button type="submit" id="search-btn">Search</button>
+      </div>
+      <div class="year-filter">
+        <span class="year-filter-label">Published between</span>
+        <input type="number" id="year-from" min="0" max="3000" placeholder="e.g. 1890" autocomplete="off" />
+        <span>and</span>
+        <input type="number" id="year-to" min="0" max="3000" placeholder="e.g. 2026" autocomplete="off" />
+        <span class="year-filter-hint">(optional — leave blank for all years)</span>
       </div>
     </form>
 
@@ -80,6 +88,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=9"></script>
+  <script src="/static/app.js?v=10"></script>
 </body>
 </html>

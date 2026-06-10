@@ -83,6 +83,32 @@ class SearchRequest(BaseModel):
     top_n: int = Field(100, ge=1, le=200)
     page: int = Field(1, ge=1)
     page_size: int = Field(20, ge=1, le=50)
+    # Optional published-year window. When either bound is set, books whose
+    # year falls outside — or can't be determined — are filtered out.
+    year_from: int | None = Field(None, ge=0, le=3000)
+    year_to: int | None = Field(None, ge=0, le=3000)
+
+
+def _publish_year(book) -> int | None:
+    """Best-effort published year: OL's first_publish_year (int) or the
+    leading year of GB's publishedDate ('2005-03-01' / '2005')."""
+    meta = book.metadata or {}
+    year = meta.get("publish_year")
+    if isinstance(year, int):
+        return year
+    m = re.match(r"\s*(\d{4})", str(meta.get("publishedDate") or year or ""))
+    return int(m.group(1)) if m else None
+
+
+def _year_in_range(book, lo: int | None, hi: int | None) -> bool:
+    """True when no filter is set; with a filter, unknown years are excluded —
+    the point of filtering is curation, so 'maybe' doesn't make the cut."""
+    if lo is None and hi is None:
+        return True
+    year = _publish_year(book)
+    if year is None:
+        return False
+    return (lo is None or year >= lo) and (hi is None or year <= hi)
 
 
 @app.post("/build", summary="Build the recommendation index")
@@ -144,6 +170,8 @@ def search(
             if dedup_key in seen_keys:
                 continue
             seen_keys.add(dedup_key)
+            if not _year_in_range(book, req.year_from, req.year_to):
+                continue
             score = _score_book(book, query_lower, req.category)
             if score >= THRESHOLD:
                 accepted.append((book, score))
@@ -173,6 +201,8 @@ def search(
             if dedup_key in seen_keys:
                 continue
             seen_keys.add(dedup_key)
+            if not _year_in_range(book, req.year_from, req.year_to):
+                continue
             score = _score_book(book, query_lower, req.category)
             if score >= THRESHOLD:
                 accepted.append((book, score))

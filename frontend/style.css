@@ -889,3 +889,152 @@ main {
 .site-footer a:hover {
   text-decoration: underline;
 }
+
+/* ---- Year filter row ---- */
+.year-filter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+  font-size: 0.85rem;
+  color: #8b8d97;
+  flex-wrap: wrap;
+}
+
+.year-filter input {
+  width: 6.5rem;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.85rem;
+  border: 1px solid #2a2d35;
+  border-radius: 6px;
+  background: #1a1c24;
+  color: #e1e2e6;
+}
+
+.year-filter input:focus {
+  outline: none;
+  border-color: #5c6bc0;
+}
+
+.year-filter-hint {
+  font-size: 0.75rem;
+  color: #555;
+}
+
+/* ---- Book cover in expanded details ---- */
+.book-cover {
+  float: left;
+  width: 92px;
+  margin: 0.2rem 1rem 0.5rem 0;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.book-details::after {  /* contain the float */
+  content: "";
+  display: block;
+  clear: both;
+}
+
+/* ---- Light mode ----
+   Dark is the default; body.light opts in (persisted in localStorage).
+   Curated overrides for the major surfaces rather than a full variable
+   refactor — extend here if a new component reads as too dark. */
+body.light {
+  background: #f4f4f7;
+  color: #24262e;
+}
+
+body.light header h1 { color: #3f51b5; }
+body.light .subtitle,
+body.light .year-filter,
+body.light #results-heading { color: #5a5d6b; }
+
+body.light #search-input,
+body.light .year-filter input,
+body.light .auth-card input {
+  background: #ffffff;
+  color: #24262e;
+  border-color: #c9ccd6;
+}
+
+body.light .tab {
+  background: #e8e9ef;
+  color: #5a5d6b;
+  border-color: #c9ccd6;
+}
+
+body.light .tab.active {
+  background: #5c6bc0;
+  color: #fff;
+  border-color: #5c6bc0;
+}
+
+body.light .book-card,
+body.light .stats-card,
+body.light .auth-card,
+body.light .back-btn {
+  background: #ffffff;
+  border-color: #d8dae2;
+}
+
+body.light .book-card:hover { border-color: #b9bdcc; }
+body.light .book-title { color: #24262e; }
+body.light .book-authors,
+body.light .book-description,
+body.light .stats-label,
+body.light .library-hint,
+body.light .site-footer { color: #5a5d6b; }
+
+body.light .tag {
+  background: #e8e9ef;
+  color: #5a5d6b;
+  border-color: #c9ccd6;
+}
+
+body.light .save-btn,
+body.light .similar-btn,
+body.light .remove-btn,
+body.light .feedback-btn,
+body.light .section-select,
+body.light .auth-btn,
+body.light .page-btn {
+  background: #ffffff;
+  border-color: #c9ccd6;
+}
+
+body.light .section-chip {
+  background: #ffffff;
+  border-color: #c9ccd6;
+  color: #5a5d6b;
+}
+
+body.light .section-chip.active {
+  background: #5c6bc0;
+  border-color: #5c6bc0;
+  color: #fff;
+}
+
+body.light .section-chip.section-builtin {
+  border-color: #d9b370;
+  color: #9a7224;
+}
+
+body.light .section-chip.section-builtin.active {
+  background: #8a6d3b;
+  border-color: #8a6d3b;
+  color: #fff;
+}
+
+body.light .library-views { background: #e9f3e9; border-color: #bcd6bc; }
+body.light .library-view { color: #3a7c3a; border-color: #cfe2cf; }
+body.light .library-view.active,
+body.light .library-view.active:hover { background: #3a7c3a; color: #fff; }
+body.light .library-view:hover { background: #d9ead9; color: #2a5c2a; }
+
+body.light .stats-table th { color: #8b8d97; }
+body.light .stats-table td { color: #24262e; border-color: #d8dae2; }
+body.light .book-rank { color: #d0d2da; }
+body.light .book-expand { color: #9aa; }
+body.light .site-footer { border-color: #d8dae2; }

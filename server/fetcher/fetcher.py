@@ -236,6 +236,11 @@ class Fetcher:
     @staticmethod
     def _from_google_item(item: dict) -> Books:
         info = item.get("volumeInfo", {})
+        # Cover thumbnail — Google serves these over http:// in the API
+        # response; force https so the image isn't blocked as mixed content.
+        thumb = (info.get("imageLinks") or {}).get("thumbnail") or ""
+        if thumb.startswith("http://"):
+            thumb = "https://" + thumb[len("http://"):]
         return Books(
             id=f"gb_{item.get('id', '')}",
             title=info.get("title", ""),
@@ -247,6 +252,7 @@ class Fetcher:
                 "pageCount": info.get("pageCount"),
                 "infoLink": info.get("infoLink"),
                 "language": info.get("language"),
+                "thumbnail": thumb or None,
                 "source": "google_books",
             },
         )
@@ -304,6 +310,13 @@ class Fetcher:
         languages = doc.get("language", []) or []
         language = languages[0] if isinstance(languages, list) and languages else None
 
+        # Open Library covers are addressed by the numeric cover_i id.
+        cover_id = doc.get("cover_i")
+        thumb = (
+            f"https://covers.openlibrary.org/b/id/{cover_id}-M.jpg"
+            if cover_id else None
+        )
+
         return Books(
             id=f"ol_{doc.get('key', '')}",
             title=doc.get("title", ""),
@@ -318,6 +331,7 @@ class Fetcher:
                 "want_to_read_count": doc.get("want_to_read_count", 0),
                 "already_read_count": doc.get("already_read_count", 0),
                 "language": language,
+                "thumbnail": thumb,
                 "source": "open_library",
             },
         )

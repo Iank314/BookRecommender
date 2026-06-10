@@ -11,6 +11,10 @@ const container  = document.getElementById("results-container");
 const tabs       = document.querySelectorAll(".tab");
 const pagination = document.getElementById("pagination");
 const searchBar  = document.querySelector(".search-bar");
+const yearFilter = document.querySelector(".year-filter");
+const yearFrom   = document.getElementById("year-from");
+const yearTo     = document.getElementById("year-to");
+const themeToggle = document.getElementById("theme-toggle");
 
 // Auth elements
 const authStatus    = document.getElementById("auth-status");
@@ -76,10 +80,12 @@ tabs.forEach((tab) => {
 
     if (activeCategory === "library") {
       searchBar.classList.add("hidden");
+      yearFilter.classList.add("hidden");
       viewMode = "library";
       loadLibrary();
     } else {
       searchBar.classList.remove("hidden");
+      yearFilter.classList.remove("hidden");
       input.placeholder = placeholders[activeCategory];
       viewMode = "search";
       input.focus();
@@ -87,7 +93,47 @@ tabs.forEach((tab) => {
   });
 });
 
+// ---- Theme (dark default, light opt-in, persisted) ----
+
+function applyTheme(light) {
+  document.body.classList.toggle("light", light);
+  themeToggle.textContent = light ? "🌙" : "☀️";
+  themeToggle.title = light ? "Switch to dark mode" : "Switch to light mode";
+  try { localStorage.setItem("bookrec-theme", light ? "light" : "dark"); } catch {}
+}
+
+themeToggle.addEventListener("click", () => {
+  applyTheme(!document.body.classList.contains("light"));
+});
+
+try { applyTheme(localStorage.getItem("bookrec-theme") === "light"); } catch {}
+
+// ---- Genre accent colors (display only) ----
+
+const GENRE_ACCENTS = [
+  [/romance|romantasy|love/i, "#ec5f87"],
+  [/fantasy/i, "#a36bd6"],
+  [/science fiction|sci-?fi|space/i, "#26c6da"],
+  [/horror|ghost/i, "#e05252"],
+  [/mystery|crime|detective|noir/i, "#7986cb"],
+  [/thriller|suspense/i, "#ff8a5c"],
+  [/litrpg|gamelit|isekai|xianxia|wuxia/i, "#9575ff"],
+  [/young adult|juvenile|children/i, "#ffc94d"],
+  [/histor/i, "#bd9272"],
+  [/biograph|memoir|nonfiction|non-fiction/i, "#90a4ae"],
+  [/adventure|western/i, "#81c784"],
+];
+
+function genreAccent(genre) {
+  for (const [re, color] of GENRE_ACCENTS) {
+    if (re.test(genre)) return color;
+  }
+  return null;
+}
+
 // ---- Auth ----
+
+let startedAtLibrary = false;
 
 async function checkAuth() {
   try {
@@ -105,6 +151,13 @@ async function checkAuth() {
     currentIsAdmin = false;
   }
   renderAuthBar();
+  // Returning logged-in users land on their library, not an empty search box.
+  // Anonymous visitors keep the search view — they have no library yet.
+  if (currentUser && !startedAtLibrary) {
+    startedAtLibrary = true;
+    const libTab = document.querySelector('.tab[data-category="library"]');
+    if (libTab && viewMode === "search" && !lastQuery) libTab.click();
+  }
 }
 
 function renderAuthBar() {
@@ -314,11 +367,15 @@ async function doSearch(query, category, page) {
   showLoading("Searching and ranking books...");
 
   try {
+    const yf = parseInt(yearFrom.value, 10);
+    const yt = parseInt(yearTo.value, 10);
     const res = await fetch(`${API}/search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         query, category, top_n: 100, page, page_size: 20,
+        year_from: Number.isFinite(yf) ? yf : null,
+        year_to: Number.isFinite(yt) ? yt : null,
       }),
     });
     if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || `Search failed`);
@@ -977,6 +1034,13 @@ function renderBookList(books, startRank, options = {}) {
     const genreLabel = document.createElement("div");
     genreLabel.className = "genre-label";
     genreLabel.textContent = genre;
+    // Tint the group toward its genre — romance reads pink, sci-fi cyan, etc.
+    const accent = genreAccent(genre);
+    if (accent) {
+      genreLabel.style.color = accent;
+      section.style.borderLeft = `3px solid ${accent}`;
+      section.style.paddingLeft = "0.8rem";
+    }
     section.appendChild(genreLabel);
 
     for (const book of genreBooks) {
@@ -1054,6 +1118,19 @@ function createCard(book, options = {}) {
   // Expandable details
   const details = document.createElement("div");
   details.className = "book-details hidden";
+
+  // Cover image (when the provider supplied one) — floats left so the
+  // description wraps around it. Broken/missing images remove themselves.
+  const thumbUrl = (book.metadata || {}).thumbnail;
+  if (thumbUrl) {
+    const cover = document.createElement("img");
+    cover.className = "book-cover";
+    cover.src = thumbUrl;
+    cover.alt = `Cover of ${book.title}`;
+    cover.loading = "lazy";
+    cover.addEventListener("error", () => cover.remove());
+    details.appendChild(cover);
+  }
 
   if (book.description) {
     const desc = document.createElement("p");

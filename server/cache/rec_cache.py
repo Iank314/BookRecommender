@@ -23,7 +23,8 @@ from typing import Iterable
 # a hot reload and be served with the new code's expectations.
 # v2: token plural-folding + genre-synonym folding changed scoring output.
 # v3: liked books excluded from recommendation candidates.
-CACHE_VERSION = 3
+# v4: cover thumbnails added to book metadata.
+CACHE_VERSION = 4
 
 
 class RecommendationCache:
