@@ -43,7 +43,7 @@ SESSION_COOKIE_SECURE = os.environ.get("BOOKREC_SECURE_COOKIES", "").lower() in 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 logger = logging.getLogger(__name__)
 NonEmptyStr = constr(strip_whitespace=True, min_length=1)
-Username = constr(strip_whitespace=True, min_length=3, max_length=32)
+Username = constr(strip_whitespace=True, min_length=2, max_length=32)
 Password = constr(min_length=6, max_length=128)
 Category = Literal["title", "author", "genre", "general"]
 RemoteSource = Literal[

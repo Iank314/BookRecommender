@@ -159,6 +159,14 @@ authForm.addEventListener("submit", async (e) => {
   const username = authUsername.value.trim();
   const password = authPassword.value;
   if (!username || !password) return;
+  if (authMode === "register") {
+    const problem = credentialProblem(username, password);
+    if (problem) {
+      authError.textContent = problem;
+      authError.classList.remove("hidden");
+      return;
+    }
+  }
   const endpoint = authMode === "login" ? "/auth/login" : "/auth/register";
   authSubmit.disabled = true;
   try {
@@ -168,7 +176,7 @@ authForm.addEventListener("submit", async (e) => {
       body: JSON.stringify({ username, password }),
     });
     const data = await res.json().catch(() => null);
-    if (!res.ok) throw new Error(data?.detail || "Authentication failed");
+    if (!res.ok) throw new Error(friendlyError(data?.detail));
     currentUser = data.username;
     currentIsAdmin = !!data.is_admin;
     renderAuthBar();
@@ -1267,4 +1275,48 @@ function hideLoading() {
 function showError(msg) {
   errorBox.textContent = msg;
   errorBox.classList.remove("hidden");
+}
+
+// Account rules — keep in sync with the server's Username/Password constraints
+// in server/app.py (constr min_length/max_length).
+const USERNAME_MIN = 2, USERNAME_MAX = 32;
+const PASSWORD_MIN = 6, PASSWORD_MAX = 128;
+
+// Returns a friendly message if the credentials break a rule, else null.
+function credentialProblem(username, password) {
+  if (username.length < USERNAME_MIN)
+    return `Sorry, the username has to be at least ${USERNAME_MIN} characters.`;
+  if (username.length > USERNAME_MAX)
+    return `Sorry, the username can be at most ${USERNAME_MAX} characters.`;
+  if (password.length < PASSWORD_MIN)
+    return `Sorry, the password has to be at least ${PASSWORD_MIN} characters.`;
+  if (password.length > PASSWORD_MAX)
+    return `Sorry, the password can be at most ${PASSWORD_MAX} characters.`;
+  return null;
+}
+
+// Turn a server error `detail` into a readable message. FastAPI returns a
+// string for our own HTTPExceptions (409 taken, 401 bad login, 429 throttle)
+// but an array of validation objects for 422s — translate those into the same
+// friendly wording instead of letting them stringify to "[object Object]".
+function friendlyError(detail) {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    for (const e of detail) {
+      const field = e?.loc?.[e.loc.length - 1];
+      if (field === "username" || field === "password") {
+        const label = field === "username" ? "username" : "password";
+        if (e.type === "string_too_short") {
+          const min = field === "username" ? USERNAME_MIN : PASSWORD_MIN;
+          return `Sorry, the ${label} has to be at least ${min} characters.`;
+        }
+        if (e.type === "string_too_long") {
+          const max = field === "username" ? USERNAME_MAX : PASSWORD_MAX;
+          return `Sorry, the ${label} can be at most ${max} characters.`;
+        }
+      }
+      if (e?.msg) return e.msg;
+    }
+  }
+  return "Authentication failed.";
 }

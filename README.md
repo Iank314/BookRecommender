@@ -237,6 +237,8 @@ uvicorn server.app:app --reload
 # Open http://localhost:8000 in your browser
 ```
 
+Live Link: https://dynamic-commons-substances-placing.trycloudflare.com/
+
 On first run the server creates a SQLite database at `data/library.db` for accounts and saved libraries. Override the location with the `BOOKREC_DB_PATH` environment variable.
 
 **Optional — Google Books API key.** Without a key, Google Books' unauthenticated per-IP limit is low; firing several genre queries at once can return `429 Too Many Requests`, in which case the app backs off and leans on Open Library. Set a free key to raise the quota and keep Google in the results:
@@ -304,13 +306,8 @@ This is the fastest path — no Cloudflare account, no domain, no token. Roughly
    ```bash
    docker compose --profile public up -d --build
    ```
-5. **Grab the public URL from the cloudflared logs** and share it.
-   ```bash
-   docker compose logs cloudflared
-   # Look for a line like:
-   # https://<random-words>.trycloudflare.com
-   ```
 
+Live link: https://dynamic-commons-substances-placing.trycloudflare.com/
 That URL is live for as long as the stack stays up. Take it down (and close the public door) with:
 
 ```bash
