@@ -72,6 +72,8 @@ def test_ol_subject_phrases_fold_to_genres():
     assert _genre_atoms(["Detective and mystery stories"])[0] == ["mystery"]
     assert _genre_atoms(["Love stories"])[0] == ["romance"]
     assert _genre_atoms(["Fantasy fiction"])[0] == ["fantasy"]
+    assert _genre_atoms(["Mystery fiction"])[0] == ["mystery"]
+    assert _genre_atoms(["Detective fiction"])[0] == ["mystery"]
 
 
 def test_synonyms_apply_inside_slash_split_tags():

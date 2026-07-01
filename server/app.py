@@ -1376,6 +1376,8 @@ _GENRE_SYNONYMS = {
     "detective and mystery stories": "mystery",
     "mystery and detective": "mystery",
     "mystery & detective": "mystery",
+    "mystery fiction": "mystery",
+    "detective fiction": "mystery",
     "love stories": "romance",
     "romance fiction": "romance",
     "graphic novels": "graphic novel",
