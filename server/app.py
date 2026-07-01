@@ -638,35 +638,13 @@ def find_similar(
         return []
 
     # --- 5) Collapse each series to its earliest-volume entry ---
-    # If several volumes of one series rank, keep only the earliest present —
-    # the series holds the rank of its best-scoring volume but is displayed
-    # as the earliest volume seen, so we don't recommend "book 11".
-    series_rep: dict[str, tuple[Books, float, int]] = {}  # key -> (book, score, volume)
-    order: list[str] = []  # series keys in best-score-first order
-    for cand, score in scored:
-        skey, vol = _split_series(cand.title)
-        v = vol if vol is not None else 1
-        if skey not in series_rep:
-            order.append(skey)
-            series_rep[skey] = (cand, score, v)
-        elif v < series_rep[skey][2]:
-            series_rep[skey] = (cand, score, v)
-
-    top = [(series_rep[k][0], series_rep[k][1]) for k in order][: req.top_n]
+    collapsed = _collapse_series_picks([(cand, score, None) for cand, score in scored])
+    top = [(book, score) for book, score, _ in collapsed][: req.top_n]
 
     # --- 6) Swap any later-volume entry for its book 1 ---
-    # Recommend the series' entry point, not "book 11". Only later-volume
-    # titles trigger a lookup, and they run concurrently, so the cost is small.
     src_titles = {_norm_title(req.title)}
     src_langs = {src_lang} if src_lang and src_lang != "non-latin" else set()
-
-    def _resolve(entry: tuple[Books, float]) -> tuple[Books, float]:
-        book, score = entry
-        return _entry_point_book(book, src_langs, src_titles), score
-
-    if top:
-        with ThreadPoolExecutor(max_workers=min(8, len(top))) as ex:
-            top = list(ex.map(_resolve, top))
+    top = _swap_to_entry_points(top, src_langs, src_titles)
 
     result = [_to_out(book, relevance=round(sim * 100, 1)) for book, sim in top]
     # Empty results aren't cached — the earlier exits are usually transient
@@ -1606,6 +1584,60 @@ def _entry_point_book(book: Books, lib_langs: set[str], saved_titles: set[str]) 
     return best
 
 
+def _collapse_series_picks(
+    scored: list[tuple[Books, float, object]],
+) -> list[tuple[Books, float, object]]:
+    """Collapse multi-volume series so each series appears once.
+
+    Input is (book, score, payload) in best-score-first order. A series takes
+    the rank (list position) of its best-scoring volume but is displayed as the
+    earliest volume present, with that earliest volume's score — recommending
+    "book 11" of a series is useless. The payload rides along from the
+    best-scoring volume untouched: /library/recommend uses it to carry the
+    best-matching saved-book index for the diversity step, /similar passes None.
+
+    Shared by /similar and /library/recommend so the two stay aligned; the
+    entry-point swap in _swap_to_entry_points then recovers book 1 when even the
+    earliest present volume is still a sequel.
+    """
+    # key -> [book, score, volume, payload]
+    rep: dict[str, list] = {}
+    order: list[str] = []  # series keys in best-score-first order
+    for book, score, payload in scored:
+        skey, vol = _split_series(book.title)
+        v = vol if vol is not None else 1
+        if skey not in rep:
+            order.append(skey)
+            rep[skey] = [book, score, v, payload]
+        elif v < rep[skey][2]:
+            # earlier volume -> display this instead, but keep the rank and
+            # payload of the best-scoring volume seen first.
+            rep[skey][0], rep[skey][1], rep[skey][2] = book, score, v
+    return [(rep[k][0], rep[k][1], rep[k][3]) for k in order]
+
+
+def _swap_to_entry_points(
+    entries: list[tuple[Books, float]], langs: set[str], titles: set[str],
+) -> list[tuple[Books, float]]:
+    """Swap any later-volume series entry for its book 1, concurrently.
+
+    Recommend the series' entry point, not "book 11". Only later-volume titles
+    trigger a provider lookup (see _entry_point_book), and they run in parallel,
+    so the cost is small. `langs`/`titles` constrain the match to the source's
+    language and exclude books the user already has. Shared by /similar and
+    /library/recommend.
+    """
+    if not entries:
+        return entries
+
+    def _resolve(entry: tuple[Books, float]) -> tuple[Books, float]:
+        book, score = entry
+        return _entry_point_book(book, langs, titles), score
+
+    with ThreadPoolExecutor(max_workers=min(8, len(entries))) as ex:
+        return list(ex.map(_resolve, entries))
+
+
 def _ensure_details(book: Books) -> bool:
     """Fill in a book's language and (for sparse Open Library works) its genres
     and full description from work detail. Mutates in place; returns True if
@@ -1924,22 +1956,11 @@ def library_recommend(
     scored.sort(key=lambda x: x[2], reverse=True)
 
     # --- 6) Collapse each series to its entry point ---
-    # If several volumes of a series rank, show only the earliest one present
-    # (book 1 / lowest volume) — recommending "book 11" of a series is useless.
-    # The series keeps the rank of its best-scoring volume but is displayed as
-    # the entry-point book.
-    series_rep: dict[str, tuple[Books, float, int]] = {}  # key -> (book, score, volume)
-    series_src: dict[str, int] = {}
-    order: list[str] = []  # series keys in best-score-first order
-    for cand, score, _final, src_idx in scored:
-        skey, vol = _split_series(cand.title)
-        v = vol if vol is not None else 1
-        if skey not in series_rep:
-            order.append(skey)
-            series_rep[skey] = (cand, score, v)
-            series_src[skey] = src_idx
-        elif v < series_rep[skey][2]:
-            series_rep[skey] = (cand, score, v)  # earlier volume -> display this instead
+    # The payload carried alongside each pick is the best-matching saved-book
+    # index, which the diversity step below caps on.
+    collapsed = _collapse_series_picks(
+        [(cand, score, src_idx) for cand, score, _final, src_idx in scored]
+    )
 
     # --- 7) Diversify: spread picks across the library's books and authors ---
     # Caps per saved book (so no single saved book dominates) and per author
@@ -1950,9 +1971,7 @@ def library_recommend(
     author_counts: dict[str, int] = defaultdict(int)
     chosen: list[tuple[Books, float]] = []
     overflow: list[tuple[Books, float]] = []
-    for skey in order:
-        cand, score, _v = series_rep[skey]
-        src_idx = series_src[skey]
+    for cand, score, src_idx in collapsed:
         author = _norm_title(cand.authors[0]) if cand.authors else ""
         if src_counts[src_idx] < per_source_cap and (not author or author_counts[author] < author_cap):
             chosen.append((cand, score))
@@ -1967,15 +1986,7 @@ def library_recommend(
         chosen.extend(overflow[: top_n - len(chosen)])
 
     # --- 8) Swap any later-volume series entry for its book 1 ---
-    # Recommend the entry point, not "book 11". Only later-volume titles trigger
-    # a lookup, and they run concurrently, so the cost is small.
-    def _resolve(entry: tuple[Books, float]) -> tuple[Books, float]:
-        book, score = entry
-        return _entry_point_book(book, lib_langs, saved_titles), score
-
-    if chosen:
-        with ThreadPoolExecutor(max_workers=min(8, len(chosen))) as ex:
-            chosen = list(ex.map(_resolve, chosen))
+    chosen = _swap_to_entry_points(chosen, lib_langs, saved_titles)
 
     result = [_to_out(book, relevance=round(score * 100, 1)) for book, score in chosen]
     # Empty results are NOT cached: they're usually a transient provider
