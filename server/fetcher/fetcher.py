@@ -17,6 +17,7 @@ try:
 except ImportError:  # pragma: no cover
     requests = None
 
+from server.cache.rec_cache import TTLCache
 from server.models.book import Books
 
 GOOGLE_ENDPOINT  = "https://www.googleapis.com/books/v1/volumes"
@@ -28,9 +29,18 @@ _HTTP_TIMEOUT = (5, 15)
 
 # In-memory response cache so repeated genre queries (litrpg, fantasy, ...) across
 # /search, /similar and /library/recommend don't re-hit the APIs within the TTL.
+# Bounded LRU + TTL: every distinct (url, params) is a fresh key, so an unbounded
+# dict would grow one entry per unique query for the life of the process — a slow
+# leak on a long-running server. The cap makes it evict instead. `copier=dict`
+# shallow-copies the decoded JSON on the way in/out.
 _CACHE_TTL = 600.0  # seconds
-_cache: dict[str, tuple[float, dict]] = {}
-_cache_lock = threading.Lock()
+_CACHE_MAX_ENTRIES = 512
+_cache = TTLCache(max_entries=_CACHE_MAX_ENTRIES, ttl_seconds=_CACHE_TTL, copier=dict)
+
+
+def cache_size() -> int:
+    """Live entry count of the response cache — surfaced in /admin/stats."""
+    return len(_cache)
 
 # Cap concurrent Google Books requests. Unauthenticated Google has a very low
 # per-IP limit, and we fan genre queries out across a thread pool; without this
@@ -66,10 +76,9 @@ def _get_json(url: str, params: dict | None, *,
               retries: int = 0) -> dict:
     """GET JSON with a TTL cache, optional concurrency cap, and 429 backoff."""
     key = _cache_key(url, params)
-    with _cache_lock:
-        hit = _cache.get(key)
-        if hit and (time.time() - hit[0]) < _CACHE_TTL:
-            return hit[1]
+    hit = _cache.get(key)
+    if hit is not None:
+        return hit
 
     attempt = 0
     while True:
@@ -88,8 +97,7 @@ def _get_json(url: str, params: dict | None, *,
             continue
         resp.raise_for_status()
         data = resp.json()
-        with _cache_lock:
-            _cache[key] = (time.time(), data)
+        _cache.put(key, data)
         return data
 
 

@@ -29,6 +29,14 @@ services:
     # Docker network. Nothing hits the app except through HTTPS.
     expose:
       - "8000"
+    # Cap RAM so a runaway/leak OOM-kills just this container (which `restart`
+    # then brings back) instead of the whole box thrashing into swap. Set to
+    # ~70-80% of the instance's RAM, leaving headroom for Caddy + the OS.
+    # This assumes a >=1GB instance; on a 512MB box drop it to ~384m.
+    # memswap_limit == mem_limit disables swap for the container, so a leak
+    # actually hits the cap and OOM-kills instead of thrashing into swap first.
+    mem_limit: 768m
+    memswap_limit: 768m
     restart: unless-stopped
 
   caddy:
@@ -43,6 +51,8 @@ services:
       - caddy_config:/config
     depends_on:
       - bookrec
+    mem_limit: 128m       # Caddy is lightweight; a proxy shouldn't need more.
+    memswap_limit: 128m   # no swap — same reasoning as bookrec above.
     restart: unless-stopped
 
 volumes:

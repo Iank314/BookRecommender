@@ -284,12 +284,18 @@ function renderAdminStats(data) {
   const cards = document.createElement("div");
   cards.className = "stats-cards";
   const a24 = data.activity.last_24h, a7 = data.activity.last_7d, all = data.activity.all_time;
+  const mem = data.memory || {};
+  const caches = data.caches || {};
+  const memValue = mem.rss_mb != null ? `${mem.rss_mb} MB` : "—";
+  const memLabel = mem.peak_rss_mb != null ? `Memory RSS (peak ${mem.peak_rss_mb} MB)` : "Memory RSS";
   const spec = [
     [`${data.active_users.last_24h} / ${data.active_users.last_7d}`, "Active users (24h / 7d)"],
     [`${n(a24, "search")} / ${n(a7, "search")} / ${n(all, "search")}`, "Searches (24h / 7d / all)"],
     [`${n(a24, "similar")} / ${n(a7, "similar")} / ${n(all, "similar")}`, "Find Similar (24h / 7d / all)"],
     [`${n(a24, "recommend")} / ${n(a7, "recommend")} / ${n(all, "recommend")}`, "Recommendations (24h / 7d / all)"],
     [`${data.anonymous_events.last_24h} / ${data.anonymous_events.last_7d}`, "Anonymous events (24h / 7d)"],
+    [memValue, memLabel],
+    [`${caches.recommendation ?? 0} / ${caches.similar ?? 0} / ${caches.fetcher ?? 0}`, "Cache entries (rec / similar / fetcher)"],
   ];
   for (const [value, label] of spec) {
     const card = document.createElement("div");

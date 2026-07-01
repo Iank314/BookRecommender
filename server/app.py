@@ -6,6 +6,7 @@ import math
 import logging
 import os
 import re
+import threading
 import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +16,7 @@ from typing import Literal
 from fastapi import Body, Cookie, Depends, FastAPI, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, constr
 
 import hashlib
@@ -22,7 +24,12 @@ import hashlib
 from server.auth_throttle import LoginThrottle
 from server.moderation import username_is_clean
 from server.cache.rec_cache import CACHE_VERSION, RecommendationCache, TTLCache
-from server.fetcher.fetcher import Fetcher, GOOGLE_ENDPOINT, OPENLIB_ENDPOINT
+from server.fetcher.fetcher import (
+    Fetcher,
+    GOOGLE_ENDPOINT,
+    OPENLIB_ENDPOINT,
+    cache_size as fetcher_cache_size,
+)
 from server.models.book import Books
 from server.recommender.recommendation_engine import RecommendationEngine
 from server.recommender.recommender import Recommender
@@ -31,15 +38,35 @@ from server.storage.feedback_db import FeedbackKind, FeedbackStore
 from server.storage.library_db import LibraryStore, SectionNameTakenError
 from server.storage.users_db import UserStore, UsernameTakenError
 
+
+def _env_flag(name: str) -> bool:
+    """True if env var `name` is set to a truthy string (1/true/yes/on)."""
+    return os.environ.get(name, "").lower() in ("1", "true", "yes", "on")
+
+
+def _env_number(name: str, default, cast=float):
+    """Parse a numeric env var, falling back to `default` if unset or malformed.
+
+    Guards module import: a typo'd BOOKREC_* number (e.g. "2s") would otherwise
+    raise ValueError at import and stop the whole app from booting.
+    """
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return cast(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s=%r; falling back to default %r.", name, raw, default)
+        return default
+
+
 SESSION_COOKIE = "bookrec_session"
 COOKIE_MAX_AGE = 60 * 60 * 24 * 365  # 1 year
 # Set BOOKREC_SECURE_COOKIES=true in production (Fly/any HTTPS host) so the
 # session cookie is only sent over HTTPS. Off by default so local HTTP dev
 # keeps working; auto-detection isn't reliable behind reverse proxies that
 # terminate TLS at the edge.
-SESSION_COOKIE_SECURE = os.environ.get("BOOKREC_SECURE_COOKIES", "").lower() in (
-    "1", "true", "yes", "on",
-)
+SESSION_COOKIE_SECURE = _env_flag("BOOKREC_SECURE_COOKIES")
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 logger = logging.getLogger(__name__)
@@ -57,6 +84,78 @@ app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 # --- Shared state built on startup ---
 recommender: Recommender | None = None
+
+
+# ------------------------------------------------------------------ #
+# Observability — request timing + optional tracemalloc leak-finder
+# ------------------------------------------------------------------ #
+# Requests slower than this log at WARNING instead of INFO: a memory leak, a
+# runaway query, or a slow enrichment path all surface as latency creep you can
+# grep for. Tune via env; 0 disables the WARNING escalation.
+SLOW_REQUEST_MS = _env_number("BOOKREC_SLOW_REQUEST_MS", 2000.0)
+
+# tracemalloc is a heavy-ish allocation tracer, so it's opt-in. When enabled we
+# snapshot a baseline at import and log the top allocation growth every N
+# requests — the actual leak-*finder* for once timing/RSS say memory is climbing.
+_TRACEMALLOC_ON = _env_flag("BOOKREC_TRACEMALLOC")
+_TRACEMALLOC_EVERY = max(1, _env_number("BOOKREC_TRACEMALLOC_EVERY", 500, cast=int))
+_tm_lock = threading.Lock()
+_tm_request_count = 0
+_tm_baseline = None
+if _TRACEMALLOC_ON:
+    import tracemalloc
+
+    tracemalloc.start()
+    _tm_baseline = tracemalloc.take_snapshot()
+    logger.info(
+        "tracemalloc enabled - baseline captured; logging top growth every %d requests.",
+        _TRACEMALLOC_EVERY,
+    )
+
+
+def _maybe_log_tracemalloc() -> None:
+    """Every N requests, log the top-10 allocation growth vs the startup baseline."""
+    global _tm_request_count
+    with _tm_lock:
+        _tm_request_count += 1
+        if _tm_request_count % _TRACEMALLOC_EVERY != 0:
+            return
+        count = _tm_request_count
+    top = tracemalloc.take_snapshot().compare_to(_tm_baseline, "lineno")[:10]
+    logger.warning("tracemalloc - top 10 allocation growth after %d requests:", count)
+    for stat in top:
+        logger.warning("  %s", stat)
+
+
+@app.middleware("http")
+async def _timing_middleware(request, call_next):
+    """Log method / path / status / duration for every request. This is the one
+    piece of runtime visibility the app previously lacked entirely."""
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        logger.exception(
+            "%s %s -> EXC %.1fms", request.method, request.url.path, elapsed_ms
+        )
+        raise
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    level = (
+        logging.WARNING
+        if SLOW_REQUEST_MS and elapsed_ms >= SLOW_REQUEST_MS
+        else logging.INFO
+    )
+    logger.log(
+        level, "%s %s -> %s %.1fms",
+        request.method, request.url.path, response.status_code, elapsed_ms,
+    )
+    if _TRACEMALLOC_ON:
+        # Snapshotting the whole heap is slow; run it off the event loop so the
+        # periodic dump never stalls concurrent requests (and then gets logged
+        # as slow by this very middleware).
+        await run_in_threadpool(_maybe_log_tracemalloc)
+    return response
 
 
 class BookOut(BaseModel):
@@ -962,6 +1061,35 @@ def auth_me(user_id: str = Depends(get_current_user_id)):
 # ------------------------------------------------------------------ #
 # Admin — usage statistics (admin accounts only)
 # ------------------------------------------------------------------ #
+def _process_memory() -> dict:
+    """Best-effort process memory, in MiB. Turns 'is memory growing?' into a
+    number. Empty on platforms where the source isn't available (e.g. Windows
+    dev has no /proc and no `resource` module) — prod is Linux, where it matters.
+    """
+    out: dict[str, float] = {}
+    # Current RSS from /proc (Linux) — the number that climbs on a leak.
+    try:
+        with open("/proc/self/status") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    out["rss_mb"] = round(int(line.split()[1]) / 1024, 1)  # KiB→MiB
+                    break
+    except (OSError, ValueError, IndexError):
+        # Missing /proc (non-Linux) or a malformed VmRSS line — best-effort, so
+        # degrade to no rss_mb rather than 500 the admin panel.
+        pass
+    # Peak RSS via resource (POSIX). ru_maxrss is KiB on Linux (bytes on macOS,
+    # but prod is Linux) — a high-water mark that only ever grows.
+    try:
+        import resource
+
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        out["peak_rss_mb"] = round(peak / 1024, 1)
+    except (ImportError, ValueError):
+        pass
+    return out
+
+
 @app.get("/admin/stats", summary="Admin: accounts and usage statistics")
 def admin_stats(user_id: str = Depends(get_admin_user_id)):
     now = int(time.time())
@@ -998,6 +1126,16 @@ def admin_stats(user_id: str = Depends(get_admin_user_id)):
             "last_24h": activity_store.anonymous_events_since(day),
             "last_7d": activity_store.anonymous_events_since(week),
         },
+        # In-process cache occupancy — watch for any that pin at its cap and
+        # never drain, or memory that climbs while these stay flat (leak is
+        # elsewhere). All three are bounded LRUs.
+        "caches": {
+            "recommendation": len(rec_cache),
+            "similar": len(similar_cache),
+            "fetcher": fetcher_cache_size(),
+        },
+        # Process memory in MiB (Linux prod only; empty on Windows dev).
+        "memory": _process_memory(),
     }
 
 

@@ -15,7 +15,7 @@ import hashlib
 import time
 from collections import OrderedDict
 from threading import Lock
-from typing import Iterable
+from typing import Any, Callable, Iterable
 
 # Bump whenever the shape of a cached payload changes — _to_out fields,
 # display-tag cleanup, scoring that alters what gets returned. The version is
@@ -86,6 +86,11 @@ class RecommendationCache:
             for k in stale:
                 del self._store[k]
 
+    def __len__(self) -> int:
+        """Current entry count — surfaced in /admin/stats for leak-watching."""
+        with self._lock:
+            return len(self._store)
+
 
 class TTLCache:
     """Thread-safe LRU cache whose entries also expire after a fixed TTL.
@@ -96,6 +101,15 @@ class TTLCache:
     several users (or one indecisive user) clicking the same book repeatedly.
 
     `clock` is injectable for tests; production uses time.monotonic.
+
+    `copier` makes a defensive copy on the way in and out so a caller can't
+    mutate the cached *container*. It defaults to `list` (the /similar payload
+    is a list of book dicts); the fetcher's response cache passes `dict`, since
+    its payloads are decoded JSON objects. Both are SHALLOW copies of the right
+    container type — the top-level list/dict is isolated, but nested structures
+    (a cached dict's inner lists, a cached list's inner dicts) stay shared, so
+    callers must treat anything below the top level as read-only. Pass a value
+    whose type matches the copier.
     """
 
     def __init__(
@@ -103,14 +117,16 @@ class TTLCache:
         max_entries: int = 256,
         ttl_seconds: float = 3600.0,
         clock=time.monotonic,
+        copier: Callable[[Any], Any] = list,
     ) -> None:
-        self._store: OrderedDict[str, tuple[float, list]] = OrderedDict()
+        self._store: OrderedDict[str, tuple[float, Any]] = OrderedDict()
         self._lock = Lock()
         self._max = max_entries
         self._ttl = ttl_seconds
         self._clock = clock
+        self._copy = copier
 
-    def get(self, key: str) -> list | None:
+    def get(self, key: str) -> Any | None:
         with self._lock:
             entry = self._store.get(key)
             if entry is None:
@@ -120,11 +136,16 @@ class TTLCache:
                 del self._store[key]
                 return None
             self._store.move_to_end(key)
-            return list(value)
+            return self._copy(value)
 
-    def put(self, key: str, value: list) -> None:
+    def put(self, key: str, value: Any) -> None:
         with self._lock:
-            self._store[key] = (self._clock() + self._ttl, list(value))
+            self._store[key] = (self._clock() + self._ttl, self._copy(value))
             self._store.move_to_end(key)
             while len(self._store) > self._max:
                 self._store.popitem(last=False)
+
+    def __len__(self) -> int:
+        """Current entry count — surfaced in /admin/stats for leak-watching."""
+        with self._lock:
+            return len(self._store)

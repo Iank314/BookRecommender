@@ -70,6 +70,32 @@ class ActivityStore:
                 (kind, user_id),
             )
 
+    def prune_before(self, cutoff: int) -> int:
+        """Delete events older than the given unix timestamp; return rows removed.
+
+        The table is append-mostly and grows one row per tracked request forever,
+        so without periodic pruning it's an unbounded disk leak. Run from the
+        `scripts.prune_activity` CLI (cron-friendly). Stats windows are 24h/7d/
+        all-time, so a generous retention (e.g. a year) keeps every reported
+        figure intact while capping growth.
+        """
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM activity_log WHERE at < ?", (cutoff,))
+            return cur.rowcount
+
+    def count_before(self, cutoff: int) -> int:
+        """Count events older than `cutoff` without deleting them.
+
+        Backs the `--dry-run` preview in `scripts.prune_activity` so the number
+        shown to the operator is computed with the exact predicate that
+        `prune_before` deletes on — the two can't drift apart.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM activity_log WHERE at < ?", (cutoff,)
+            ).fetchone()
+        return row[0]
+
     def counts_since(self, since: int) -> dict[str, int]:
         """{kind: count} for events at/after the given unix timestamp."""
         with self._connect() as conn:

@@ -66,6 +66,31 @@ def test_external_mutation_does_not_corrupt_cache():
     assert cache.get("k") == [{"id": "a"}]
 
 
+def test_dict_copier_isolates_stored_value():
+    # The fetcher cache passes copier=dict (its payloads are decoded JSON
+    # objects). A shallow copy in and out means neither the source nor the
+    # returned dict can mutate what's cached.
+    clock = FakeClock()
+    cache = TTLCache(ttl_seconds=60, clock=clock, copier=dict)
+    payload = {"a": 1}
+    cache.put("k", payload)
+    payload["b"] = 2          # mutate the source after put
+    got = cache.get("k")
+    assert got == {"a": 1}
+    got["c"] = 3              # mutate what we got back
+    assert cache.get("k") == {"a": 1}
+
+
+def test_len_reflects_entry_count():
+    clock = FakeClock()
+    cache = TTLCache(max_entries=2, ttl_seconds=60, clock=clock)
+    assert len(cache) == 0
+    cache.put("a", [1])
+    cache.put("b", [2])
+    cache.put("c", [3])       # evicts a (LRU)
+    assert len(cache) == 2
+
+
 def test_signature_embeds_cache_version(monkeypatch):
     # The whole point of CACHE_VERSION: same inputs, different version →
     # different signature, so pre-deploy payloads can't be served post-deploy.

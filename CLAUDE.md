@@ -129,8 +129,30 @@ deployment budget — Koyeb's free Nano is 512MB RAM, so prefer ONNX MiniLM
   timestamp. No queries/titles/IPs stored. Recording is best-effort
   (`_record_activity`) and must never fail a request.
 - CLI stats: `python -m scripts.stats` (read-only, safe against the live DB).
+- **Retention:** `activity_log` is append-only and never trimmed by the app, so
+  it grows one row per tracked request forever. `ActivityStore.prune_before(ts)`
+  deletes old rows; run it via `python -m scripts.prune_activity --days N`
+  (`--dry-run` to preview). Cron it (e.g. weekly, keep a year) alongside the
+  backup job. It only bounds *disk*, not memory.
 
-## Caching (three layers, all in `server/cache/rec_cache.py`)
+## Observability
+
+- **Request-timing middleware** (`_timing_middleware` in app.py) logs
+  `METHOD path -> status ms` for every request at INFO; requests slower than
+  `BOOKREC_SLOW_REQUEST_MS` (default 2000) log at WARNING. First line of defence
+  for "something got slow" — a leak, runaway query, or slow enrichment shows as
+  latency creep. `/static` requests go through it too, so filter if noisy.
+- `GET /admin/stats` also returns `caches` (entry counts for the three LRUs —
+  `recommendation` / `similar` / `fetcher`) and `memory` (`rss_mb` + `peak_rss_mb`
+  on Linux; empty on Windows dev). Surfaced as cards in the admin panel. Watch a
+  cache pinned at its cap while RSS climbs → leak is elsewhere.
+- **tracemalloc leak-finder** (opt-in): set `BOOKREC_TRACEMALLOC=true` to snapshot
+  a baseline at import and log the top-10 allocation growth every
+  `BOOKREC_TRACEMALLOC_EVERY` requests (default 500). Off by default — it adds
+  per-allocation overhead; turn it on only when a signal above says memory is
+  climbing.
+
+## Caching (three LRUs in `server/cache/rec_cache.py`, plus the fetcher's)
 
 - `RecommendationCache` — per-user LRU for /library/recommend, keyed on a signature
   hash of saved+liked+disliked IDs (+ scope bucket for section/selection runs).
@@ -138,6 +160,11 @@ deployment budget — Koyeb's free Nano is 512MB RAM, so prefer ONNX MiniLM
   hash of the source book's title/authors/tags/description + top_n. Anonymous
   endpoint, so entries age out instead of being invalidated. Empty results are NOT
   cached (usually transient provider failures).
+- **Fetcher response cache** (`_cache` in `server/fetcher/fetcher.py`) — the same
+  `TTLCache` class (bounded LRU + 10-min TTL, `copier=dict`), keyed on
+  `(url, params)`. Was an unbounded dict that leaked one entry per distinct query
+  for the life of the process; now capped at `_CACHE_MAX_ENTRIES`. `cache_size()`
+  exposes its length for /admin/stats.
 - `CACHE_VERSION` constant — mixed into both keys. **Bump it whenever the cached
   payload shape changes** (_to_out fields, display-tag cleanup, scoring output).
 
@@ -191,7 +218,10 @@ docker compose --profile public up -d --build
 ```
 
 Env vars: `GOOGLE_BOOKS_API_KEY` (raises GB quota), `BOOKREC_DB_PATH`,
-`BOOKREC_SECURE_COOKIES=true` when behind HTTPS.
+`BOOKREC_SECURE_COOKIES=true` when behind HTTPS. Observability knobs:
+`BOOKREC_SLOW_REQUEST_MS` (default 2000 — slow-request WARNING threshold),
+`BOOKREC_TRACEMALLOC=true` + `BOOKREC_TRACEMALLOC_EVERY` (default 500) to enable
+the tracemalloc leak-finder. See "Observability" above.
 
 ## Test layout
 
@@ -201,7 +231,9 @@ genre atoms); `test_similar_scoring.py` the "Find Similar" scoring blend;
 `test_sections.py` section CRUD/membership + the cache scope bucket;
 `test_reading_status.py` the status column + schema migration;
 `test_rec_cache.py` / `test_ttl_cache.py` the caches (TTL tests use an injectable
-fake clock); `test_display_helpers.py` the display-tag
+fake clock); `test_fetcher_cache.py` the fetcher response cache stays bounded
+(monkeypatches `requests`); `test_activity_prune.py` the activity_log retention
+prune; `test_display_helpers.py` the display-tag
 cleanup; plus auth throttle, feedback store, and engine tests. Network calls in the
 live endpoints are not exercised — tests target the pure helper functions, so new
 heuristics should be written as testable module-level functions in app.py.
