@@ -6,7 +6,9 @@ __pycache__/
 dist/
 build/
 .env
-
+# Claude Code local tooling — keep out of the public repo
+CLAUDE.md
+.claude/
 # Local SQLite database
 data/
 *.db

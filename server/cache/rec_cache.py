@@ -26,7 +26,9 @@ from typing import Any, Callable, Iterable
 # v4: cover thumbnails added to book metadata.
 # v5: entity-tag demotion + tag-aware genre derivation changed display tags;
 #     language-gate resilience changed recommendation output.
-CACHE_VERSION = 5
+# v6: relevance clamped at 100 (was showing 114%); form:/franchise:/nyt: facet
+#     handling + broader content->genre derivation changed display tags & scoring.
+CACHE_VERSION = 6
 
 
 class RecommendationCache:

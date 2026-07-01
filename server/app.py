@@ -1383,11 +1383,14 @@ _GENRE_SYNONYMS = {
     "ya": "young adult",
 }
 
-# Open Library facet prefixes. "genre:"/"subject:" carry a usable genre once the
-# prefix is stripped; the rest ("series:Dungeon Crawler Carl", "person:...") are
-# not genres and make terrible search queries, so they're dropped.
-_FACET_KEEP = {"genre", "subject"}
-_FACET_DROP = {"series", "person", "place", "time", "award", "character"}
+# Open Library facet prefixes. "genre:"/"subject:"/"form:" carry a usable genre
+# once the prefix is stripped ("form:manga" -> "manga", "form:graphic novel");
+# the rest ("series:Dungeon Crawler Carl", "person:...", "franchise:One Piece",
+# "nyt:advice-how-to...=2021-03-21") are not genres and make terrible search
+# queries or group headers, so they're dropped.
+_FACET_KEEP = {"genre", "subject", "form"}
+_FACET_DROP = {"series", "person", "place", "time", "award", "character",
+               "franchise", "nyt"}
 _FACET_RE = re.compile(r"^([a-z]+)\s*:\s*(.+)$", re.IGNORECASE)
 
 
@@ -2205,13 +2208,24 @@ _DERIVED_GENRES = [
     ("Post-Apocalyptic", ["post-apocalyptic", "post apocalyptic", "postapocalyptic"]),
     ("Christian Fiction", ["christian fiction", "christian novel"]),
     # Broad fiction categories — last because they're easy to false-positive
-    # against specific subgenres above.
-    ("Science Fiction", ["science fiction", "sci-fi", "sci fi", "scifi"]),
-    ("Fantasy", ["fantasy", "witchcraft", "wizardry", "sorcery", "wizards"]),
+    # against specific subgenres above. The extra single-word signals here are a
+    # last resort before "Other": they only fire when a book carried no
+    # recognised genre tag, so a book whose only OL subjects are content
+    # descriptors ("magic", "imaginary places", "spaceships") still lands in a
+    # real genre instead of an unhelpful subject header.
+    ("Science Fiction", ["science fiction", "sci-fi", "sci fi", "scifi",
+                         "spaceship", "spaceships", "starship", "starships",
+                         "spacecraft", "galaxy", "galactic", "interstellar",
+                         "extraterrestrial", "aliens", "android", "androids",
+                         "cyborg", "space station", "outer space"]),
+    ("Fantasy", ["fantasy", "witchcraft", "wizardry", "sorcery", "wizards",
+                "wizard", "sorcerer", "sorceress", "magic", "magical",
+                "imaginary places", "dragons", "elves", "dwarves",
+                "enchanted", "spellcasting"]),
     ("Thriller", ["thriller", "psychological thriller"]),
-    ("Mystery", ["mystery", "whodunit"]),
-    ("Horror", ["horror"]),
-    ("Romance", ["romance"]),
+    ("Mystery", ["mystery", "whodunit", "detective", "detectives"]),
+    ("Horror", ["horror", "haunted", "haunting"]),
+    ("Romance", ["romance", "love story", "romantic"]),
     ("Western", ["western novel", "old west"]),
     ("Action", ["action novel", "action-packed", "action adventure"]),
     ("Adventure", ["adventure novel", "adventure story", "epic adventure"]),
@@ -2343,7 +2357,11 @@ def _to_out(b, relevance: float | None = None) -> dict:
         "metadata": b.metadata,
     }
     if relevance is not None:
-        out["relevance"] = relevance
+        # Displayed as a "match %". The ranking score can exceed 1.0 — the
+        # feedback modifier (up to 1.5x in /library/recommend) and the
+        # popularity multiplier (/similar) both push it past a clean match —
+        # so cap the number a user sees at 100 rather than showing "114%".
+        out["relevance"] = min(relevance, 100.0)
     return out
 
 

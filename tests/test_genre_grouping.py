@@ -54,6 +54,28 @@ def test_witchcraft_in_description_derives_fantasy():
     assert display[0] == "Fantasy"
 
 
+def test_magic_subject_tags_derive_fantasy():
+    # Real "Shadows of Self" (Mistborn) tags: OL gives only story-content
+    # descriptors, none of which is a recognised genre word — so the book was
+    # landing under "Domestic Terrorism" instead of Fantasy. The "magic" /
+    # "imaginary places" signals must pull it into Fantasy.
+    tags = ["domestic terrorism", "imaginary places", "magic",
+            "religious disputations"]
+    display = _clean_tags_for_display(tags, "Kelsier returns to the city.", "SoS")
+    assert display[0] == "Fantasy"
+
+
+def test_spaceship_content_derives_science_fiction_when_tagless():
+    # A tagless result whose description is unmistakably SF must not fall to the
+    # "Other" bucket.
+    display = _clean_tags_for_display(
+        [],
+        "A lone starship drifts past a dead galaxy; the last android aboard wakes.",
+        "Derelict",
+    )
+    assert display and display[0] == "Science Fiction"
+
+
 # ---- language pipeline ---------------------------------------------------------
 
 def test_ol_language_prefers_english_when_present():

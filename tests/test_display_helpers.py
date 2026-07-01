@@ -10,6 +10,7 @@ from server.app import (
     _clean_tags_for_display,
     _desc_is_sequel,
     _split_series,
+    _to_out,
 )
 from server.models.book import Books
 
@@ -109,6 +110,30 @@ def test_clean_keeps_other_facet_prefixes():
     assert "Adventure" in out
 
 
+def test_clean_keeps_form_facet_value():
+    # Open Library "form:" subjects (manga/graphic novels) carry a real genre
+    # once the prefix is stripped — keep the value, drop the "form:" noise.
+    out = _clean_tags_for_display(
+        ["form:manga", "form:graphic novel"],
+        description="", title="",
+    )
+    assert "manga" in out
+    assert "graphic novel" in out
+    assert not any(t.startswith("form:") for t in out)
+
+
+def test_clean_drops_franchise_and_nyt_facets():
+    # "franchise:One Piece" is a series/franchise name, not a genre, and the
+    # "nyt:advice-how-to...=2021-03-21" bestseller-list slugs are pure noise —
+    # both must not become the group header.
+    out = _clean_tags_for_display(
+        ["franchise:One Piece", "nyt:advice-how-to-and-miscellaneous=2021-03-21",
+         "Fantasy"],
+        description="", title="",
+    )
+    assert out == ["Fantasy"]
+
+
 def test_clean_dedupes_case_insensitive():
     out = _clean_tags_for_display(
         ["Fantasy", "fantasy", "FANTASY"],
@@ -158,6 +183,30 @@ def test_derived_genre_only_prepended_when_first_tag_is_weak():
         title="",
     )
     assert out == ["Science Fiction"]
+
+
+# ---- _to_out relevance clamp ----------------------------------------------
+
+def _rel_bk() -> Books:
+    return Books(id="x", title="T", authors=[], description="", tags=[],
+                 metadata={})
+
+
+def test_to_out_clamps_relevance_over_100():
+    # The 114% bug: /library/recommend's feedback modifier (up to 1.5x) can
+    # push the ranking score past 1.0, so score*100 exceeds 100. A user should
+    # never see "114%".
+    assert _to_out(_rel_bk(), relevance=114.0)["relevance"] == 100.0
+    # /similar's popularity multiplier can nudge it just over, too.
+    assert _to_out(_rel_bk(), relevance=104.7)["relevance"] == 100.0
+
+
+def test_to_out_leaves_normal_relevance_untouched():
+    assert _to_out(_rel_bk(), relevance=87.3)["relevance"] == 87.3
+
+
+def test_to_out_omits_relevance_when_none():
+    assert "relevance" not in _to_out(_rel_bk())
 
 
 # ---- _book_language --------------------------------------------------------
