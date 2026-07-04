@@ -20,10 +20,14 @@ from server.app import (
     FB_AUTHOR_DISLIKE,
     FB_MOD_HI,
     FB_MOD_LO,
+    W_DESC,
+    W_GENRE,
+    _blend_genre_desc,
     _compute_token_idf,
     _feedback_authors,
     _feedback_modifier,
     _has_recommendable_content,
+    _net_disliked_authors,
     _score_similar_candidates,
     _text_tokens,
 )
@@ -92,27 +96,32 @@ def test_similar_scoring_drops_descriptionless_book():
 
 # ---- description weighted above genre ----------------------------------------
 
-def test_description_weighted_above_genre():
-    # A strong description match that is OFF-genre must outrank a weak
-    # description match that is in-genre. Under the old 0.5/0.5 blend the
-    # in-genre book won; with 0.6/0.4 the description carries it.
-    source = _bk(
-        "src", "The Crystal Sword",
-        description="An orphan discovers a crystal sword and battles the "
-                    "necromancer king across the frozen wastes of a dying kingdom.",
-        tags=["Fantasy", "Epic Fantasy"])
-    strong_desc_offgenre = _bk(
-        "d", "Blade of Winter",
-        description="An orphan discovers a crystal sword and battles the "
-                    "necromancer king across the frozen wastes of a dying kingdom.",
-        tags=["Occultism"], authors=["X"])
-    weak_desc_ingenre = _bk(
-        "g", "Random Fantasy",
-        description="A tale set in a distant kingdom.",
-        tags=["Fantasy", "Adventure"], authors=["Y"])
-    ranked = [b.id for b, _ in _score_similar_candidates(
-        source, [weak_desc_ingenre, strong_desc_offgenre])]
-    assert ranked[0] == "d"
+def test_description_outweighs_genre_in_the_blend():
+    # The core R2 guard: with equal-magnitude signals, description must
+    # contribute more than genre. Deterministic — fails if the weights are
+    # reverted to equal (0.5/0.5) or flipped.
+    desc_only = _blend_genre_desc(genre_score=0.0, desc_score=0.5, has_genres=True)
+    genre_only = _blend_genre_desc(genre_score=0.5, desc_score=0.0, has_genres=True)
+    assert desc_only > genre_only
+    assert W_DESC > W_GENRE
+
+
+def test_blend_is_description_only_without_genres():
+    # A tagless candidate is judged on description alone, not dragged down by a
+    # genre_score it never had a chance to earn.
+    assert _blend_genre_desc(0.9, 0.3, has_genres=False) == 0.3
+
+
+def test_blend_ranking_flips_at_the_weight_boundary():
+    # A strong-genre/weak-description book vs an off-genre/strong-description one,
+    # chosen so the ranking flips exactly at the weight boundary: under equal
+    # weights the in-genre book wins, but with W_DESC > W_GENRE the description
+    # match wins. This is precisely the behaviour R2 asks for.
+    ingenre_weak = _blend_genre_desc(genre_score=0.6, desc_score=0.1, has_genres=True)
+    offgenre_strong = _blend_genre_desc(genre_score=0.0, desc_score=0.6, has_genres=True)
+    assert offgenre_strong > ingenre_weak                       # 0.36 > 0.30 at 0.4/0.6
+    # Sanity: under equal 0.5/0.5 weights the in-genre book would have won.
+    assert 0.5 * 0.6 + 0.5 * 0.1 > 0.5 * 0.0 + 0.5 * 0.6         # 0.35 > 0.30
 
 
 # ---- _feedback_authors -------------------------------------------------------
@@ -122,13 +131,15 @@ def test_feedback_authors_squash_spelling():
     assert _feedback_authors(books) == {"erinhunter"}
 
 
-def test_author_liked_and_disliked_cancels():
-    # The netting the call site applies: an author both liked and disliked is
-    # removed from the disliked set, so their books aren't cut.
+def test_net_disliked_authors_cancels_conflicts():
+    # The production helper library_recommend uses: an author both liked and
+    # disliked is dropped from the penalty set (the like cancels the dislike),
+    # while a purely-disliked author stays. Guards R1(c) via the real code path.
     liked = [_bk("l", authors=["Mixed Author"])]
-    disliked = [_bk("d", authors=["Mixed Author"])]
-    net_disliked = _feedback_authors(disliked) - _feedback_authors(liked)
-    assert net_disliked == set()
+    disliked = [_bk("d", authors=["Mixed Author"]), _bk("d2", authors=["Bad Author"])]
+    net = _net_disliked_authors(liked, disliked)
+    assert net == {"badauthor"}          # purely-disliked author penalised
+    assert "mixedauthor" not in net       # liked+disliked author spared
 
 
 # ---- _feedback_modifier ------------------------------------------------------

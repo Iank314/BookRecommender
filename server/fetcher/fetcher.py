@@ -49,10 +49,13 @@ _cache = TTLCache(max_entries=_CACHE_MAX_ENTRIES, ttl_seconds=_CACHE_TTL, copier
 # first-person opinion phrases catches unsigned notes. Kept deliberately narrow
 # to avoid discarding legitimate blurbs.
 _READER_NOTE_SIGNATURE = re.compile(r"\b\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}\s*$")
+# Kept narrow: only phrasing a reader uses about their OWN reaction. Marketing
+# blurbs collide with "highly recommended for fans of…" and generic "readers
+# found this…", so those are deliberately excluded to avoid dropping real
+# descriptions (which the no-description gate would then cut the book on).
 _READER_NOTE_OPINION = re.compile(
     r"\b(to my liking|in my opinion|my least favou?rite|not for me|"
-    r"i (?:loved|hated|disliked|enjoyed|couldn'?t finish this|found this)|"
-    r"highly recommend(?:ed)?|would(?:n'?t| not) recommend|don'?t bother)\b",
+    r"i (?:couldn'?t finish|could not finish|didn'?t care for))\b",
     re.IGNORECASE,
 )
 

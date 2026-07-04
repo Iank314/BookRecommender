@@ -922,6 +922,17 @@ def _feedback_authors(books: list[Books]) -> set[str]:
     }
 
 
+def _net_disliked_authors(
+    liked_books: list[Books], disliked_books: list[Books],
+) -> set[str]:
+    """Squashed authors to penalise: thumbed down but NOT also thumbed up.
+
+    A like on the same author cancels the dislike, so we never nuke every book
+    by an author the user has mixed feelings about (they disliked one entry but
+    liked another)."""
+    return _feedback_authors(disliked_books) - _feedback_authors(liked_books)
+
+
 def _feedback_modifier(
     cand: Books,
     cand_text: set[str],
@@ -951,6 +962,25 @@ def _feedback_modifier(
     return max(FB_MOD_LO, min(FB_MOD_HI, mod))
 
 
+# Description outweighs genre in the blend: the description is the primary
+# relevance signal (user's request — "weigh the description the highest along
+# with genre"), genre a strong secondary, popularity only a tiebreaker below
+# both. Module-level so both scoring paths share one definition and the ordering
+# is testable. Shared by _score_similar_candidates and library_recommend.
+W_GENRE, W_DESC = 0.4, 0.6
+
+
+def _blend_genre_desc(genre_score: float, desc_score: float, has_genres: bool) -> float:
+    """Combine genre-overlap and description-similarity into one score.
+
+    Blended (description-weighted) when the candidate carries genre tags; judged
+    on description alone when it doesn't, so a tagless book isn't dragged down by
+    a zero genre_score it never had a chance to earn."""
+    if has_genres:
+        return W_GENRE * genre_score + W_DESC * desc_score
+    return desc_score
+
+
 def _score_similar_candidates(
     source: Books, candidates: list[Books],
 ) -> list[tuple[Books, float]]:
@@ -958,12 +988,12 @@ def _score_similar_candidates(
 
     Same math as the /library/recommend scoring loop: IDF-weighted token-set
     F1 over title + description (genre tags excluded so genre isn't counted
-    twice), blended 50/50 with genre-atom overlap when both sides carry tags,
-    and popularity as a small multiplicative tiebreaker. The endpoint
-    previously lumped title + tags + description into one token bag and added
-    popularity on top — a candidate sharing only genre-tag strings scored as
-    if its text matched, and popular-but-irrelevant books nearly doubled
-    their score at the low end.
+    twice), blended with genre-atom overlap (description-weighted, see
+    _blend_genre_desc) when both sides carry tags, and popularity as a small
+    multiplicative tiebreaker. The endpoint previously lumped title + tags +
+    description into one token bag and added popularity on top — a candidate
+    sharing only genre-tag strings scored as if its text matched, and
+    popular-but-irrelevant books nearly doubled their score at the low end.
     """
     src_text = _text_tokens(source)
     src_genres = set(_genre_atoms(source.tags)[0])
@@ -972,14 +1002,11 @@ def _score_similar_candidates(
 
     idf = _compute_token_idf(candidates)
     default_idf = math.log(len(candidates) + 1) + 1
-    # Description outweighs genre (0.6 vs 0.4): the description is the primary
-    # relevance signal, genre a strong secondary, popularity only a tiebreaker.
-    W_GENRE, W_DESC = 0.4, 0.6
 
     scored: list[tuple[Books, float]] = []
     for cand in candidates:
         if not _has_recommendable_content(cand):
-            continue  # no description and no author — data junk, not a rec
+            continue  # no description — genre alone is too weak to recommend on
         cand_text = _text_tokens(cand)
         desc_score = _idf_weighted_f1(src_text, cand_text, idf, default_idf)
         # When the source has text, a candidate must share some of it — genre
@@ -987,10 +1014,9 @@ def _score_similar_candidates(
         if src_text and desc_score <= 0:
             continue
         cand_genres = set(_genre_atoms(cand.tags)[0])
-        if cand_genres and src_genres:
-            combined = W_GENRE * _genre_score(cand_genres, src_genres) + W_DESC * desc_score
-        else:
-            combined = desc_score
+        combined = _blend_genre_desc(
+            _genre_score(cand_genres, src_genres), desc_score,
+            has_genres=bool(cand_genres and src_genres))
         if combined <= 0:
             continue
         final = combined * (1.0 + 0.05 * _book_popularity(cand))
@@ -2146,9 +2172,6 @@ def library_recommend(
 
     idf = _compute_token_idf(candidates, token_fn=_text_tokens)
     default_idf = math.log(len(candidates) + 1) + 1
-    # Description outweighs genre (0.6 vs 0.4): the description is the primary
-    # relevance signal, genre a strong secondary, popularity only a tiebreaker.
-    W_GENRE, W_DESC = 0.4, 0.6
     # When the library is fiction, drop candidates whose genres read as
     # nonfiction (how-tos, histories) — they otherwise match on shared theme
     # words like "magic" or "combat".
@@ -2160,15 +2183,14 @@ def library_recommend(
     liked_text = [t for t in (_text_tokens(b) for b in liked_books) if t]
     disliked_text = [t for t in (_text_tokens(b) for b in disliked_books) if t]
     liked_authors = _feedback_authors(liked_books)
-    # An author both liked and disliked isn't penalised — the like cancels it.
-    disliked_authors = _feedback_authors(disliked_books) - liked_authors
+    disliked_authors = _net_disliked_authors(liked_books, disliked_books)
     has_feedback = bool(liked_text or disliked_text or liked_authors or disliked_authors)
 
     # (candidate, displayed_score, ranking_score, best-matching saved-book index)
     scored: list[tuple[Books, float, float, int]] = []
     for cand in candidates:
         if not _has_recommendable_content(cand):
-            continue  # no description and no author — data junk, not a rec
+            continue  # no description — genre alone is too weak to recommend on
         if drop_nonfiction and _fiction_signal(cand) < 0:
             continue
         cand_text = _text_tokens(cand)
@@ -2182,10 +2204,9 @@ def library_recommend(
         if desc_score <= 0:
             continue
         cand_genres = set(_genre_atoms(cand.tags)[0])
-        if cand_genres:
-            combined = W_GENRE * _genre_score(cand_genres, profile_specific) + W_DESC * desc_score
-        else:
-            combined = desc_score
+        combined = _blend_genre_desc(
+            _genre_score(cand_genres, profile_specific), desc_score,
+            has_genres=bool(cand_genres))
         if has_feedback:
             combined *= _feedback_modifier(
                 cand, cand_text, liked_text, disliked_text,
