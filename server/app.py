@@ -875,6 +875,80 @@ def _idf_weighted_f1(
     return 2 * recall * precision / (recall + precision)
 
 
+def _has_recommendable_content(book: Books) -> bool:
+    """True if a candidate has real substance to recommend on — a description
+    or a named author.
+
+    A record with neither (e.g. a bare compilation title like "The City
+    Cantabile Choir Presents" that carries only a lone matching genre atom) is
+    data junk: it rides into results on one lucky genre match plus a
+    coincidental title-token overlap, and there is nothing to show the user
+    about it. Drop it.
+    """
+    if (book.description or "").strip():
+        return True
+    return any(a and a.strip() for a in book.authors)
+
+
+# --- Feedback re-weighting -------------------------------------------------- #
+# A thumbs-up nudges similar candidates up; a thumbs-down pushes similar ones
+# down. Two signals combine multiplicatively on the base genre/description
+# score:
+#   1. Description-token similarity (the same IDF-weighted F1 used for ranking)
+#      to the nearest liked / disliked book. Dislikes weigh more than likes
+#      (FB_BETA > FB_ALPHA): users react more strongly to "stop showing me
+#      this" than to "give me more like this".
+#   2. Author match. Disliking one or more books by an author is a clear "not
+#      this author" signal that token overlap between sibling books routinely
+#      misses (two Warrior Cats novels share little prose), so a candidate by a
+#      disliked author is cut hard. A liked author gets a gentle lift.
+# The clamp lets a single description signal only dampen/lift, while the author
+# penalty can still drive a rejected author/series far down the list.
+FB_ALPHA, FB_BETA = 0.5, 1.0
+FB_MOD_LO, FB_MOD_HI = 0.02, 1.5
+FB_AUTHOR_DISLIKE = 0.2
+FB_AUTHOR_LIKE = 1.15
+
+
+def _feedback_authors(books: list[Books]) -> set[str]:
+    """Squashed author names across a feedback list (edition-spelling-proof via
+    _squash_author, so 'Erin Hunter' and 'erin  hunter' collapse to one key)."""
+    return {
+        _squash_author(a)
+        for b in books for a in b.authors
+        if a and a.strip()
+    }
+
+
+def _feedback_modifier(
+    cand: Books,
+    cand_text: set[str],
+    liked_text: list[set[str]],
+    disliked_text: list[set[str]],
+    liked_authors: set[str],
+    disliked_authors: set[str],
+    idf: dict[str, float],
+    default_idf: float,
+) -> float:
+    """Multiplicative score re-weight in [FB_MOD_LO, FB_MOD_HI] from thumbs
+    up/down — see the block comment above for the two signals it blends."""
+    up_sim = max(
+        (_idf_weighted_f1(t, cand_text, idf, default_idf) for t in liked_text),
+        default=0.0,
+    )
+    down_sim = max(
+        (_idf_weighted_f1(t, cand_text, idf, default_idf) for t in disliked_text),
+        default=0.0,
+    )
+    mod = 1.0 + FB_ALPHA * up_sim - FB_BETA * down_sim
+    cand_authors = {_squash_author(a) for a in cand.authors if a and a.strip()}
+    if cand_authors & disliked_authors:
+        mod *= FB_AUTHOR_DISLIKE
+    elif cand_authors & liked_authors:
+        mod *= FB_AUTHOR_LIKE
+    return max(FB_MOD_LO, min(FB_MOD_HI, mod))
+
+
 def _score_similar_candidates(
     source: Books, candidates: list[Books],
 ) -> list[tuple[Books, float]]:
@@ -896,10 +970,14 @@ def _score_similar_candidates(
 
     idf = _compute_token_idf(candidates)
     default_idf = math.log(len(candidates) + 1) + 1
-    W_GENRE, W_DESC = 0.5, 0.5
+    # Description outweighs genre (0.6 vs 0.4): the description is the primary
+    # relevance signal, genre a strong secondary, popularity only a tiebreaker.
+    W_GENRE, W_DESC = 0.4, 0.6
 
     scored: list[tuple[Books, float]] = []
     for cand in candidates:
+        if not _has_recommendable_content(cand):
+            continue  # no description and no author — data junk, not a rec
         cand_text = _text_tokens(cand)
         desc_score = _idf_weighted_f1(src_text, cand_text, idf, default_idf)
         # When the source has text, a candidate must share some of it — genre
@@ -2066,25 +2144,29 @@ def library_recommend(
 
     idf = _compute_token_idf(candidates, token_fn=_text_tokens)
     default_idf = math.log(len(candidates) + 1) + 1
-    W_GENRE, W_DESC = 0.5, 0.5
+    # Description outweighs genre (0.6 vs 0.4): the description is the primary
+    # relevance signal, genre a strong secondary, popularity only a tiebreaker.
+    W_GENRE, W_DESC = 0.4, 0.6
     # When the library is fiction, drop candidates whose genres read as
     # nonfiction (how-tos, histories) — they otherwise match on shared theme
     # words like "magic" or "combat".
     drop_nonfiction = _library_is_fiction(saved)
 
-    # Feedback signals: a thumbs-up nudges similar candidates up, a thumbs-down
-    # nudges similar ones down. Same IDF-weighted F1 we already trust for
-    # description scoring, against the best-matching liked / disliked book.
-    # Modifier is multiplicative on `combined` and clamped so a single signal
-    # can't completely override the underlying genre/description match.
+    # Feedback signals (see _feedback_modifier): thumbs-up/down re-weight each
+    # candidate by description similarity to the nearest liked/disliked book
+    # AND by whether it shares an author with a disliked book.
     liked_text = [t for t in (_text_tokens(b) for b in liked_books) if t]
     disliked_text = [t for t in (_text_tokens(b) for b in disliked_books) if t]
-    FB_ALPHA, FB_BETA = 0.5, 0.5
-    FB_MOD_LO, FB_MOD_HI = 0.1, 1.5
+    liked_authors = _feedback_authors(liked_books)
+    # An author both liked and disliked isn't penalised — the like cancels it.
+    disliked_authors = _feedback_authors(disliked_books) - liked_authors
+    has_feedback = bool(liked_text or disliked_text or liked_authors or disliked_authors)
 
     # (candidate, displayed_score, ranking_score, best-matching saved-book index)
     scored: list[tuple[Books, float, float, int]] = []
     for cand in candidates:
+        if not _has_recommendable_content(cand):
+            continue  # no description and no author — data junk, not a rec
         if drop_nonfiction and _fiction_signal(cand) < 0:
             continue
         cand_text = _text_tokens(cand)
@@ -2102,17 +2184,11 @@ def library_recommend(
             combined = W_GENRE * _genre_score(cand_genres, profile_specific) + W_DESC * desc_score
         else:
             combined = desc_score
-        if liked_text or disliked_text:
-            up_sim = max(
-                (_idf_weighted_f1(t, cand_text, idf, default_idf) for t in liked_text),
-                default=0.0,
+        if has_feedback:
+            combined *= _feedback_modifier(
+                cand, cand_text, liked_text, disliked_text,
+                liked_authors, disliked_authors, idf, default_idf,
             )
-            down_sim = max(
-                (_idf_weighted_f1(t, cand_text, idf, default_idf) for t in disliked_text),
-                default=0.0,
-            )
-            fb_mod = max(FB_MOD_LO, min(FB_MOD_HI, 1.0 + FB_ALPHA * up_sim - FB_BETA * down_sim))
-            combined *= fb_mod
         pop = _book_popularity(cand)
         final = combined * (1.0 + 0.05 * pop)
         scored.append((cand, combined, final, best_idx))

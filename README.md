@@ -74,8 +74,9 @@ A full-stack book recommendation system that searches **Google Books** and **Ope
 
 ### Content-Based Recommendations
 - **Similar books**: given a book, fetches candidates matching its genres and scores them with the same blend as library recommendations — genre-tag overlap ⊕ IDF-weighted description similarity — including tagless-candidate enrichment, the fiction/nonfiction filter, and mid-series-sequel dropping (plain cosine collapsed across the differing vocabularies of Google Books and Open Library, so token-set scoring is used instead)
-- **Library-based recommendations**: fetches candidates across your library's genres and scores each one against your closest saved book by blending a **genre-overlap score** with a **description-similarity score** — falling back to description-only when a candidate has no genre tags
-- **Thumbs up / thumbs down**: any book you 👍 or 👎 becomes a recommendation signal — candidates similar (IDF-weighted token-set F1) to thumbs-up books are nudged up, similar to thumbs-down books are nudged down (multiplicative modifier, clamped so a single signal can't fully override the genre/description match). Both liked and disliked books are removed from candidate pools entirely — a 👍 book re-weights what gets recommended but is never recommended back itself, and neither can slip back in via a different edition
+- **Library-based recommendations**: fetches candidates across your library's genres and scores each one against your closest saved book by blending a **description-similarity score** (weighted highest, 0.6) with a **genre-overlap score** (0.4) — falling back to description-only when a candidate has no genre tags
+- **Content-quality gate**: a candidate with neither a description nor an author is dropped — such records (e.g. a bare compilation title carrying a lone matching genre tag) otherwise ride into results on one lucky genre match, and there's nothing to show the user about them anyway
+- **Thumbs up / thumbs down**: any book you 👍 or 👎 becomes a recommendation signal — candidates similar (IDF-weighted token-set F1) to thumbs-up books are nudged up, similar to thumbs-down books are nudged down, with dislikes weighing more than likes. A candidate by an author you've thumbed down (and not also thumbed up) is cut hard: two books in a series you rejected often share too little prose for text overlap alone to suppress the rest, so authorship is weighed directly. Both liked and disliked books are removed from candidate pools entirely — a 👍 book re-weights what gets recommended but is never recommended back itself, and neither can slip back in via a different edition
 - **Open Library enrichment**: candidates that arrive without genres have their subjects and full description back-filled from Open Library's work-detail endpoint, so they can be judged on genre, not text alone
 - **Language matching**: recommendations are limited to the language(s) of the source — your library's languages for library recs, the clicked book's language for "Find Similar" (detected from each book's title script) — so an all-English request won't surface Russian, Japanese, Korean, or Chinese editions
 - **Fiction/nonfiction filter**: when your library is fiction, nonfiction candidates (how-tos, histories, biographies) are dropped so they can't match on shared theme words like "magic" or "combat"
@@ -138,9 +139,14 @@ Library genres + languages ─► Fetch candidates (concurrent: Google Books + O
    Enrich tagless candidates  (Open Library work detail → genres + description)
                         │
                         ▼
+   Drop contentless junk (no author + no description)
+                        │
+                        ▼
    Score each candidate vs. the closest saved book:
-       genre_score (tag overlap)  ⊕  description_score (IDF-weighted token F1)
-       └─ blend when tagged, description-only when not; popularity = tiebreaker
+       description_score (IDF-weighted token F1, weighted 0.6)  ⊕  genre_score (tag overlap, 0.4)
+       └─ blend when tagged, description-only when not
+          └─ re-weight by 👍/👎 (incl. a hard same-author dislike penalty)
+          └─ popularity = final tiebreaker
                         │
                         ▼
    Collapse series to one entry  →  diversify (cap per saved book + per author)

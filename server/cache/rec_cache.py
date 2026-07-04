@@ -28,7 +28,10 @@ from typing import Any, Callable, Iterable
 #     language-gate resilience changed recommendation output.
 # v6: relevance clamped at 100 (was showing 114%); form:/franchise:/nyt: facet
 #     handling + broader content->genre derivation changed display tags & scoring.
-CACHE_VERSION = 6
+# v7: description weighted above genre (0.6/0.4); contentless junk (no author +
+#     no description) dropped; author-aware feedback re-weighting — all change
+#     recommendation ranking/output.
+CACHE_VERSION = 7
 
 
 class RecommendationCache:
