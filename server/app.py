@@ -610,6 +610,12 @@ def _gather_similar_candidates(
             continue
         cleaned = " ".join(words)
         tag_lower = cleaned.lower()
+        # Not a genre — never a useful subject-search query. Checked on the raw
+        # (unfolded) tag, unlike _genre_atoms which folds synonyms first; safe
+        # while no noise atom is also a _GENRE_SYNONYMS key/target (add here too
+        # if that ever changes).
+        if tag_lower.rstrip(".") in _GENRE_NOISE_ATOMS:
+            continue
         if tag_lower in seen_query_lower:
             continue
         tag_words_set = set(tag_lower.split())
@@ -1385,6 +1391,19 @@ _GENRE_SYNONYMS = {
     "ya": "young adult",
 }
 
+# Atoms that survive tag-splitting but are NOT genres: award/marketing labels
+# (every genre has bestsellers) and Open Library person/topic *subject* facets
+# (they describe who or what a book is about, not its genre). Scored as genres
+# they manufacture cross-genre overlap — a "New York Times bestseller" self-help
+# book scored 0.5 genre overlap with a NYT-bestseller epic fantasy (Peterson's
+# "Beyond Order" surfaced under "The Way of Kings"), and romances matched a
+# thriller via "married people" (under "Gone Girl"). Dropped in _genre_atoms and
+# skipped as search queries. Extend as bad recs surface more (scripts/explain_similar).
+_GENRE_NOISE_ATOMS = {
+    "new york times bestseller",
+    "married people", "husbands", "wives",
+}
+
 # Open Library facet prefixes. "genre:"/"subject:"/"form:" carry a usable genre
 # once the prefix is stripped ("form:manga" -> "manga", "form:graphic novel");
 # the rest ("series:Dungeon Crawler Carl", "person:...", "franchise:One Piece",
@@ -1424,6 +1443,8 @@ def _genre_atoms(tags: list[str]) -> tuple[list[str], list[str]]:
                 continue
             key = " ".join(words).lower().rstrip(".")  # OL tags like "fantasy fiction."
             key = _GENRE_SYNONYMS.get(key, key)
+            if key in _GENRE_NOISE_ATOMS:
+                continue  # award/marketing label or topical subject — not a genre
             if key in _GENERIC_GENRE_TAGS:
                 generic.append(key)
             else:

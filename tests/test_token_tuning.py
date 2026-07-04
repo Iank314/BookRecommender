@@ -7,6 +7,7 @@ from server.app import (
     _enrich_source_by_title_lookup,
     _fold_token,
     _genre_atoms,
+    _genre_score,
     _score_similar_candidates,
     _text_tokens,
 )
@@ -74,6 +75,28 @@ def test_ol_subject_phrases_fold_to_genres():
     assert _genre_atoms(["Fantasy fiction"])[0] == ["fantasy"]
     assert _genre_atoms(["Mystery fiction"])[0] == ["mystery"]
     assert _genre_atoms(["Detective fiction"])[0] == ["mystery"]
+
+
+def test_genre_noise_atoms_dropped():
+    # Award/marketing labels and OL person/topic subjects survive tag-splitting
+    # but aren't genres, so _genre_atoms must drop them entirely (neither
+    # specific nor generic). Found via scripts/explain_similar.
+    assert _genre_atoms(["New York Times bestseller"]) == ([], [])
+    assert _genre_atoms(["Married people"]) == ([], [])
+    assert _genre_atoms(["Husbands", "Wives"]) == ([], [])
+    # A real genre alongside the noise still survives.
+    assert _genre_atoms(["Fiction / Fantasy / New York Times bestseller"])[0] == ["fantasy"]
+
+
+def test_marketing_label_no_longer_creates_genre_overlap():
+    # Regression: a NYT-bestseller epic fantasy and a NYT-bestseller self-help
+    # book shared a spurious 0.5 genre overlap via the marketing label alone,
+    # which pulled the self-help book into fantasy recs (Peterson's "Beyond
+    # Order" ranked #5 under "The Way of Kings"). With the label dropped they
+    # share no genre at all.
+    src = set(_genre_atoms(["Epic Fantasy", "New York Times bestseller"])[0])
+    selfhelp = set(_genre_atoms(["Conduct of life", "New York Times bestseller"])[0])
+    assert _genre_score(selfhelp, src) == 0.0
 
 
 def test_synonyms_apply_inside_slash_split_tags():
