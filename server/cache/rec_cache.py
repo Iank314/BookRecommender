@@ -31,7 +31,9 @@ from typing import Any, Callable, Iterable
 # v7: description weighted above genre (0.6/0.4); contentless junk (no author +
 #     no description) dropped; author-aware feedback re-weighting — all change
 #     recommendation ranking/output.
-CACHE_VERSION = 7
+# v8: reader-note/review text (e.g. "...gmb 3/15/20") dropped from Open Library
+#     descriptions at ingestion, changing both display blurbs and scoring tokens.
+CACHE_VERSION = 8
 
 
 class RecommendationCache:

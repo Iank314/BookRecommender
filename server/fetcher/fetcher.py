@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from typing import List, Optional
@@ -36,6 +37,32 @@ _HTTP_TIMEOUT = (5, 15)
 _CACHE_TTL = 600.0  # seconds
 _CACHE_MAX_ENTRIES = 512
 _cache = TTLCache(max_entries=_CACHE_MAX_ENTRIES, ttl_seconds=_CACHE_TTL, copier=dict)
+
+
+# Open Library's `description` and `first_sentence` fields are community-editable,
+# and some users paste a personal review or note in there instead of a blurb —
+# e.g. The Long Earth's description is literally "...just not to my liking. gmb
+# 3/15/20". We'd rather show and score NO description than someone's opinion of
+# the book, so descriptions matching these patterns are dropped at ingestion.
+# A trailing initials+date / bare-date signature is the highest-precision tell
+# (a real publisher blurb virtually never ends "gmb 3/15/20"); a small set of
+# first-person opinion phrases catches unsigned notes. Kept deliberately narrow
+# to avoid discarding legitimate blurbs.
+_READER_NOTE_SIGNATURE = re.compile(r"\b\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}\s*$")
+_READER_NOTE_OPINION = re.compile(
+    r"\b(to my liking|in my opinion|my least favou?rite|not for me|"
+    r"i (?:loved|hated|disliked|enjoyed|couldn'?t finish this|found this)|"
+    r"highly recommend(?:ed)?|would(?:n'?t| not) recommend|don'?t bother)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_reader_note(text: str) -> bool:
+    """True if an Open Library description is a reader's review/note, not a blurb."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    return bool(_READER_NOTE_SIGNATURE.search(t) or _READER_NOTE_OPINION.search(t))
 
 
 def cache_size() -> int:
@@ -165,10 +192,13 @@ class Fetcher:
         desc = data.get("description", "")
         if isinstance(desc, dict):
             desc = desc.get("value", "")
+        desc = str(desc or "")
+        if _looks_like_reader_note(desc):
+            desc = ""  # a reader's note, not a blurb — keep the subjects only
         subjects = data.get("subjects", [])
         if not isinstance(subjects, list):
             subjects = []
-        return str(desc or ""), [str(s) for s in subjects]
+        return desc, [str(s) for s in subjects]
 
     # ------------------------------------------------------------------ #
     # Local JSON
@@ -297,6 +327,8 @@ class Fetcher:
             raw = raw[0] if raw else ""
         if isinstance(raw, dict):
             raw = raw.get("value", "")
+        if _looks_like_reader_note(str(raw or "")):
+            raw = ""  # community-edited note, not the book's first sentence
 
         # Build a description from available fields if first_sentence is empty
         if not raw:
