@@ -876,18 +876,20 @@ def _idf_weighted_f1(
 
 
 def _has_recommendable_content(book: Books) -> bool:
-    """True if a candidate has real substance to recommend on — a description
-    or a named author.
+    """True if a candidate has a description to recommend on.
 
-    A record with neither (e.g. a bare compilation title like "The City
-    Cantabile Choir Presents" that carries only a lone matching genre atom) is
-    data junk: it rides into results on one lucky genre match plus a
-    coincidental title-token overlap, and there is nothing to show the user
-    about it. Drop it.
+    The description is the primary similarity signal (weighted highest in
+    scoring); without one, a candidate can only be judged on genre + title
+    tokens — too weak to be a real content-based recommendation. Two ways this
+    bit users: "The City Cantabile Choir Presents" (no author, no description)
+    rode in on a lone matching genre atom, and "An Atlas of Fantasy" (a geology
+    / literary-criticism reference book with no blurb) matched an all-fantasy
+    library on the word "fantasy" in its title alone. Both recommendation paths
+    enrich sparse Open Library descriptions BEFORE this gate runs, so a
+    still-empty description means the providers genuinely have no content to
+    assess — drop it rather than guess from genre.
     """
-    if (book.description or "").strip():
-        return True
-    return any(a and a.strip() for a in book.authors)
+    return bool((book.description or "").strip())
 
 
 # --- Feedback re-weighting -------------------------------------------------- #

@@ -43,38 +43,50 @@ def _idf_for(books):
 
 # ---- content-quality gate ----------------------------------------------------
 
-def test_no_author_no_description_is_junk():
-    # The exact reported record: a title, a lone genre atom, nothing else.
+def test_no_description_is_not_recommendable():
+    # "The City Cantabile Choir Presents" — no author, no description, a lone
+    # genre atom. Nothing to assess content similarity on.
     junk = _bk("j", "The City Cantabile Choir Presents", tags=["Epic"])
     assert _has_recommendable_content(junk) is False
 
 
-def test_author_alone_is_recommendable():
-    assert _has_recommendable_content(_bk("a", "T", authors=["Someone"])) is True
+def test_author_without_description_is_not_recommendable():
+    # "An Atlas of Fantasy" — a real author and genre tags, but no blurb, so it
+    # can only match on the word "fantasy" in its title. Genre-only is too weak.
+    atlas = _bk("a", "An Atlas of Fantasy", authors=["Jeremiah Benjamin Post"],
+                tags=["Literary Criticism", "Science Fiction & Fantasy"])
+    assert _has_recommendable_content(atlas) is False
 
 
-def test_description_alone_is_recommendable():
+def test_description_makes_a_book_recommendable():
     assert _has_recommendable_content(_bk("a", "T", description="A tale.")) is True
 
 
-def test_whitespace_only_author_does_not_count():
-    assert _has_recommendable_content(_bk("a", "T", authors=["  "])) is False
+def test_whitespace_only_description_does_not_count():
+    # A blank/whitespace description is no description, even with an author.
+    assert _has_recommendable_content(
+        _bk("a", "T", description="   ", authors=["Someone"])) is False
 
 
-def test_similar_scoring_drops_contentless_junk():
-    # Source fantasy book + a junk "Epic" record with no author/description
-    # whose title shares a token with the source, and a real look-alike.
+def test_similar_scoring_drops_descriptionless_book():
+    # A source whose text contains "fantasy", a description-less "An Atlas of
+    # Fantasy" (author + tags but no blurb) whose title shares that token, and a
+    # real look-alike with a blurb. Without the gate the Atlas would rank on the
+    # shared title token; with it, only the real match survives.
     source = _bk(
-        "src", "The Epic Crystal Sword",
-        description="An orphan wields a crystal sword against the necromancer king.",
+        "src", "The Crystal Sword",
+        description="An orphan on an epic fantasy quest wields a crystal sword "
+                    "against the necromancer king.",
         tags=["Fantasy", "Epic Fantasy"])
-    junk = _bk("junk", "The City Cantabile Choir Presents Epic", tags=["Epic"])
+    atlas = _bk("atlas", "An Atlas of Fantasy",
+                authors=["Jeremiah Benjamin Post"],
+                tags=["Literary Criticism", "Science Fiction & Fantasy"])
     real = _bk(
         "real", "Blade of Winter",
         description="An orphan wields a crystal sword against the necromancer king.",
         tags=["Fantasy"], authors=["A. Writer"])
-    ranked = [b.id for b, _ in _score_similar_candidates(source, [junk, real])]
-    assert "junk" not in ranked
+    ranked = [b.id for b, _ in _score_similar_candidates(source, [atlas, real])]
+    assert "atlas" not in ranked
     assert ranked and ranked[0] == "real"
 
 
