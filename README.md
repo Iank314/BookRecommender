@@ -4,15 +4,18 @@
 
 **Live in production at [iansbookrecs.com](https://iansbookrecs.com)** (June 2026). The app runs 24/7 on an AWS Lightsail instance ($12/mo plan, first 90 days free): Docker Compose runs the app container behind **Caddy**, which terminates HTTPS with auto-renewing Let's Encrypt certificates for `iansbookrecs.com` + `www`. DNS is Route 53; the instance has a static IP (98.94.245.234). SQLite persists on the instance disk at `~/app/data/library.db` — the full user base was migrated from the earlier home-machine deployment. See [Production deployment](#production-deployment-aws-lightsail) for the runbook.
 
-**Active iteration.** Recent work has been on recommendation-quality bug fixes surfaced by real use of the live app — categorization heuristics (facet-prefixed tags, series-name vs. genre ranking, genre derivation from description text), foreign-edition language detection (title script wins over metadata), and sequel detection from descriptions ("the fourth book in...", "the last book in this series"). The pattern lately is: try the app → spot a bad recommendation → add a small targeted fix + a regression test.
+**Active iteration.** Recent work has been on recommendation-quality bug fixes surfaced by real use of the live app — categorization heuristics (facet-prefixed tags, series-name vs. genre ranking, genre derivation from description text), foreign-edition language detection (title script wins over metadata), sequel detection from descriptions ("the fourth book in...", "the last book in this series"), and **genre-vocabulary normalization**: folding synonyms across the Google Books and Open Library vocabularies (so "sci-fi", "Science-Fiction", and "Science Fiction" score as a match) and dropping non-genre "subject" atoms that were manufacturing cross-genre matches. The latest fix (July 2026) targets Open Library subject facets that aren't genres — marketing labels like "New York Times bestseller", which had scored Jordan Peterson's self-help *Beyond Order* a 0.5 genre overlap with *The Way of Kings* (surfacing it in an epic-fantasy list), and topical facets like "married people", which pulled romances into *Gone Girl*'s recommendations. The pattern lately is: try the app → run `python -m scripts.explain_similar "<title>"` → read the score breakdown to find the bad recommendation's root cause → add a small targeted fix + a regression test.
 
-**Deployment history & next steps.** The app previously ran from a home machine via Cloudflare Quick Tunnel (runbook still below — it remains the zero-cost way to demo a branch). The old "migrate to Postgres for Koyeb" plan is **obsolete**: Lightsail's persistent disk means SQLite stays. Current operational priorities: enable Lightsail automatic snapshots (backups), set `GOOGLE_BOOKS_API_KEY` on the server, and optionally a GitHub Action for push-to-deploy.
+**Deployment history & next steps.** The app previously ran from a home machine via a Cloudflare Tunnel; that's retired now that it's on Lightsail (the `docker-compose.yml` tunnel profiles remain for local demos only). The old "migrate to Postgres for Koyeb" plan is **obsolete**: Lightsail's persistent disk means SQLite stays. Current operational priorities: enable Lightsail automatic snapshots (backups), set `GOOGLE_BOOKS_API_KEY` on the server, and optionally a GitHub Action for push-to-deploy.
 
 ---
 
 ## Next Features
 
 **Recommendation quality**
+- **Extend the non-genre subject-atom list** — the scorer now drops a seed set of Open Library subject facets that aren't genres (marketing labels like "New York Times bestseller"; person/topic facets "married people" / "husbands" / "wives") so they can't manufacture cross-genre overlap. `explain_similar` sessions surfaced more of the same class — `"crimes against"`, `"kings and rulers"`, `"imaginary places"`, `"artists"`, `"marriage"`, place-names like `"london (england)"` — worth adding to `_GENRE_NOISE_ATOMS` in [app.py](server/app.py) as they show up in bad recs. Low-risk and data-driven: one line each plus a regression assertion.
+- **Fold hard-SF genre variants** — `"hard science-fiction"` and `"hard sci-fi"` don't currently match `"hard science fiction"` (hyphen/spacing), so a hard-SF source scores only partial genre overlap with hard-SF candidates (surfaced tuning *Project Hail Mary*). A `_GENRE_SYNONYMS` alias closes the gap.
+- **Popularity-weight the `explain_similar` source lookup** — the tuning tool's `_find_source` matches on title only, so a common title can resolve to an obscure edition (querying "Circe" grabbed a 1677 opera instead of Madeline Miller's novel). Preferring a popularity-weighted match would make the debug tool reflect what users actually click. Tooling-only — the live `/similar` endpoint uses the user's clicked book, so it's unaffected.
 - **Series-name extraction from prose** — today, when a candidate's title carries no volume marker but the description says *"the fourth book in the Hitchhiker's Trilogy"*, the recommender drops the candidate rather than recommend a stranger to start mid-series. Better: extract the series name from phrases like *"in the X Trilogy"* / *"part of the Y series"* and run the existing `_entry_point_book` lookup against it, so book 1 gets swapped in instead of the sequel being dropped. The hard part is keeping false positives low (*"in the tradition of the X series"*, *"like the Y trilogy"*).
 - **Smarter nonfiction/homonym filtering** — catch tagless nonfiction and homonym genres (e.g. "magic" the occult topic vs. fantasy magic, "cultivation" the agriculture topic vs. the xianxia genre) by curating nonfiction subject markers and weighting specific genres over broad ones
 - **Semantic similarity (embeddings)** — sentence-embed descriptions for better "writing style" matching than token overlap. Gated: only when `python -m scripts.explain_similar "<title>"` sessions show bad recommendations driven by legitimate story vocabulary meaning different things in context (so far every bad rec has traced to data quality or normalization, all fixable in token land — see CLAUDE.md "Recommendation quality tuning")
@@ -237,8 +240,6 @@ uvicorn server.app:app --reload
 # Open http://localhost:8000 in your browser
 ```
 
-Live Link: https://dynamic-commons-substances-placing.trycloudflare.com/
-
 On first run the server creates a SQLite database at `data/library.db` for accounts and saved libraries. Override the location with the `BOOKREC_DB_PATH` environment variable.
 
 **Optional — Google Books API key.** Without a key, Google Books' unauthenticated per-IP limit is low; firing several genre queries at once can return `429 Too Many Requests`, in which case the app backs off and leans on Open Library. Set a free key to raise the quota and keep Google in the results:
@@ -250,7 +251,7 @@ export GOOGLE_BOOKS_API_KEY=your_key_here
 $env:GOOGLE_BOOKS_API_KEY = "your_key_here"
 ```
 
-**Production — `BOOKREC_SECURE_COOKIES`.** When serving over HTTPS (e.g. through a Cloudflare Tunnel — see [Share publicly with Cloudflare Tunnel](#share-publicly-with-cloudflare-tunnel) below), set `BOOKREC_SECURE_COOKIES=true` so the session cookie is only sent on secure connections. Leave it unset for local HTTP development — otherwise the browser refuses to send the cookie back and login appears to silently fail.
+**Production — `BOOKREC_SECURE_COOKIES`.** When serving over HTTPS (as the [production deployment](#production-deployment-aws-lightsail) does, behind Caddy), set `BOOKREC_SECURE_COOKIES=true` so the session cookie is only sent on secure connections. Leave it unset for local HTTP development — otherwise the browser refuses to send the cookie back and login appears to silently fail.
 
 ### Run with Docker
 
@@ -306,68 +307,6 @@ Frontend changes: remember to bump the `?v=N` query strings in `index.html`. Pay
 - Useful: `sudo docker compose -f docker-compose.prod.yml logs -f bookrec` (live request log), `logs caddy` (cert issuance), `ps` (status).
 - Costs: $12/mo instance (first 90 days free) + ~$13/yr domain. Static IP free while attached.
 - Backlog: enable Lightsail automatic snapshots for backups; set `GOOGLE_BOOKS_API_KEY` in an `.env` file or the compose environment.
-
-### Share publicly with Cloudflare Tunnel
-
-The compose file ships with a `cloudflared` service under an opt-in profile, so the app stays local-only by default and only becomes reachable from the open internet when you explicitly bring the tunnel up. Two modes are wired in: **Quick Tunnel** (zero setup, random URL that changes each restart — good for "let me share this for a day") and **Named Tunnel** (stable URL bound to a domain you own — the right mode once you want recruiters to bookmark the link).
-
-#### Going live for the first time (Quick Tunnel)
-
-This is the fastest path — no Cloudflare account, no domain, no token. Roughly 5 minutes once Docker is installed.
-
-1. **Install Docker Desktop** (Windows/Mac) or Docker Engine (Linux) and start it. Verify with `docker version`.
-2. **Clone the repo and `cd` into it.** The remaining commands all run from the repo root.
-3. **Set the secure-cookies env var.** Required because the browser will be talking to the tunnel over HTTPS — without this, login silently fails.
-   ```bash
-   # bash
-   export BOOKREC_SECURE_COOKIES=true
-
-   # PowerShell
-   $env:BOOKREC_SECURE_COOKIES = "true"
-   ```
-   (Optional but recommended: also `export GOOGLE_BOOKS_API_KEY=...` so the app isn't relying on the unauthenticated Google Books quota under public traffic.)
-4. **Bring the stack up with the `public` profile.** First build takes a few minutes for the scipy/scikit-learn wheels; subsequent runs are cached.
-   ```bash
-   docker compose --profile public up -d --build
-   ```
-
-Live link: https://dynamic-commons-substances-placing.trycloudflare.com/
-That URL is live for as long as the stack stays up. Take it down (and close the public door) with:
-
-```bash
-docker compose --profile public down
-```
-
-Restart the stack to re-open it — but note the Quick Tunnel will issue a **new** random URL each time, so anyone holding the old one will get a tunnel-offline page.
-
-#### Upgrading to a stable URL (Named Tunnel)
-
-Once you want a link that survives restarts and lives on your own domain, switch to the named profile. Prerequisite: a Cloudflare account with a domain on it (free plan is fine; the domain itself costs ~$10/yr if you don't already have one).
-
-1. **Create the tunnel in the Cloudflare dashboard.** Sign in → **Zero Trust → Networks → Tunnels → Create a tunnel → Cloudflared**. Name it (e.g. `bookrec`).
-2. **Copy the connector token** Cloudflare shows you — it's a long `eyJh...` string.
-3. **Add a public hostname** in the same dashboard pointing your subdomain (e.g. `bookrec.yourdomain.com`) at `http://bookrec:8000`. (Service = HTTP, URL = `bookrec:8000` — that's the in-network address of the FastAPI container.)
-4. **Bring the named profile up** with the token set on the host:
-   ```bash
-   # bash
-   export CLOUDFLARE_TUNNEL_TOKEN=eyJh...
-   export BOOKREC_SECURE_COOKIES=true
-   docker compose --profile public-named up -d --build
-
-   # PowerShell
-   $env:CLOUDFLARE_TUNNEL_TOKEN = "eyJh..."
-   $env:BOOKREC_SECURE_COOKIES = "true"
-   docker compose --profile public-named up -d --build
-   ```
-
-Your subdomain is now live and stays the same across restarts.
-
-#### Caveats worth knowing for either mode
-
-- **Uptime is tied to your machine.** Sleep, reboot, OS update, or stopping the docker daemon takes the URL down until you bring the stack back up. Existing users' accounts, libraries, and feedback are preserved on disk (`./data/library.db`) — they're only locked out, not erased.
-- **Disk failure is your single point of failure.** Daily backups of `data/library.db` are the simple answer; [Litestream](https://litestream.io) replicating to a free Cloudflare R2 or Backblaze B2 bucket is the durable one.
-- **Residential ISP terms** sometimes technically prohibit serving from a home connection. Rarely enforced, but worth knowing.
-- **First-time stranger experience.** The first request after the container spins up takes a few seconds while Python loads scipy / scikit-learn; subsequent requests are fast. Worth keeping in mind when you share the link.
 
 ### CLI Demo
 
