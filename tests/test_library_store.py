@@ -4,24 +4,9 @@ round-trip get pinned here directly (the section and reading-status suites only
 exercise these incidentally). Section-cascade and status-preservation behaviour
 live in test_sections.py / test_reading_status.py and aren't repeated."""
 
-from pathlib import Path
-
-import pytest
-
+from conftest import make_book as _book
 from server.models.book import Books
 from server.storage.library_db import LibraryStore
-
-
-@pytest.fixture
-def store(tmp_path: Path) -> LibraryStore:
-    return LibraryStore(db_path=tmp_path / "library_test.db")
-
-
-def _book(book_id: str, title: str = "T") -> Books:
-    return Books(
-        id=book_id, title=title, authors=["A"],
-        description="d", tags=[], metadata={},
-    )
 
 
 def test_add_then_get_returns_the_book(store: LibraryStore):

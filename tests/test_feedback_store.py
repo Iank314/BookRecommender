@@ -4,20 +4,15 @@ from pathlib import Path
 
 import pytest
 
+from conftest import make_book as _book
 from server.models.book import Books
 from server.storage.feedback_db import FeedbackStore
 
 
 @pytest.fixture
 def store(tmp_path: Path) -> FeedbackStore:
+    # Shadows conftest's LibraryStore `store` fixture for this module.
     return FeedbackStore(db_path=tmp_path / "feedback_test.db")
-
-
-def _book(book_id: str, title: str = "T", tags: list[str] | None = None) -> Books:
-    return Books(
-        id=book_id, title=title, authors=["A"],
-        description="d", tags=tags or [], metadata={},
-    )
 
 
 def test_set_and_lookup_kind(store: FeedbackStore):

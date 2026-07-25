@@ -8,11 +8,11 @@ Two failure modes drove the rewrite:
   2. The additive popularity boost (sim + (1-sim)*0.1*pop) nearly doubled the
      score of popular-but-irrelevant books at the low-similarity end.
 The new scorer mirrors /library/recommend: IDF-weighted F1 over title +
-description only, blended 50/50 with genre-atom overlap, popularity as a ≤5%
-multiplicative tiebreaker.
+description only, blended with genre-atom overlap (description-weighted,
+W_GENRE/W_DESC = 0.4/0.6), popularity as a ≤5% multiplicative tiebreaker.
 """
 
-from server.app import _score_similar_candidates
+from server.app import _score_similar_candidates, _similar_genre_queries
 from server.models.book import Books
 
 
@@ -107,3 +107,38 @@ def test_empty_source_returns_nothing():
 
 def test_no_candidates_returns_empty():
     assert _score_similar_candidates(SOURCE, []) == []
+
+
+# ---- _similar_genre_queries --------------------------------------------------
+# Regression: /similar's query builder was a drifted copy of _genre_atoms'
+# tag splitting that skipped the facet handling — an enriched source whose OL
+# subjects included "series:Dungeon Crawler Carl" burned one of the five
+# subject-search slots on it. Both paths now share _tag_atoms.
+
+def test_facet_tags_do_not_become_queries():
+    queries = _similar_genre_queries(
+        ["series:Dungeon Crawler Carl", "person:Carl", "genre:LitRPG"],
+        title_words={"dungeon", "crawler", "carl"}, author_words=set(),
+    )
+    assert queries == ["LitRPG"]
+
+
+def test_trailing_period_stripped_from_queries():
+    # OL subjects like "Fantasy fiction." previously went out period and all.
+    queries = _similar_genre_queries(
+        ["Fantasy fiction."], title_words=set(), author_words=set(),
+    )
+    assert queries == ["Fantasy fiction"]
+
+
+def test_generic_tags_only_used_as_fallback():
+    assert _similar_genre_queries(["Fiction", "Epic Fantasy"], set(), set()) == ["Epic Fantasy"]
+    assert _similar_genre_queries(["Fiction"], set(), set()) == ["Fiction"]
+
+
+def test_title_and_author_atoms_are_skipped():
+    queries = _similar_genre_queries(
+        ["Harry Potter", "Rowling", "Fantasy"],
+        title_words={"harry", "potter"}, author_words={"rowling"},
+    )
+    assert queries == ["Fantasy"]

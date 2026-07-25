@@ -2,22 +2,8 @@
 
 from pathlib import Path
 
-import pytest
-
-from server.models.book import Books
+from conftest import make_book as _book
 from server.storage.library_db import LibraryStore
-
-
-@pytest.fixture
-def store(tmp_path: Path) -> LibraryStore:
-    return LibraryStore(db_path=tmp_path / "library_test.db")
-
-
-def _book(book_id: str, title: str = "T") -> Books:
-    return Books(
-        id=book_id, title=title, authors=["A"],
-        description="d", tags=[], metadata={},
-    )
 
 
 def test_set_and_read_status(store: LibraryStore):

@@ -2,25 +2,11 @@
 the scope bucket on RecommendationCache.signature that keeps section-scoped
 recommendation runs from colliding with full-library ones."""
 
-from pathlib import Path
-
 import pytest
 
+from conftest import make_book as _book
 from server.cache.rec_cache import RecommendationCache
-from server.models.book import Books
 from server.storage.library_db import LibraryStore, SectionNameTakenError
-
-
-@pytest.fixture
-def store(tmp_path: Path) -> LibraryStore:
-    return LibraryStore(db_path=tmp_path / "library_test.db")
-
-
-def _book(book_id: str, title: str = "T") -> Books:
-    return Books(
-        id=book_id, title=title, authors=["A"],
-        description="d", tags=[], metadata={},
-    )
 
 
 # ---- section CRUD ----------------------------------------------------------
