@@ -729,17 +729,38 @@ function buildStatusSelect(book, card) {
   return select;
 }
 
-async function setReadingStatus(bookId, status) {
+// Shared fetch wrapper for the mutation endpoints below: JSON body when one
+// is given, true/false result, network errors mapped to false. `errorMsg`
+// (optional) surfaces the server's detail via showError on a non-OK response.
+async function apiRequest(path, { method = "POST", body, errorMsg } = {}) {
   try {
-    const res = await fetch(`${API}/library/status`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ book_id: bookId, status }),
+    const res = await fetch(`${API}${path}`, {
+      method,
+      ...(body !== undefined
+        ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+        : {}),
     });
+    if (!res.ok && errorMsg) {
+      const data = await res.json().catch(() => null);
+      showError(data?.detail || errorMsg);
+    }
     return res.ok;
   } catch {
     return false;
   }
+}
+
+// The save/feedback endpoints take the same book fields — one serializer so
+// the two can't drift.
+function bookPayload(book) {
+  return {
+    id: book.id, title: book.title, authors: book.authors,
+    description: book.description || "", tags: book.tags, metadata: book.metadata || {},
+  };
+}
+
+async function setReadingStatus(bookId, status) {
+  return apiRequest("/library/status", { body: { book_id: bookId, status } });
 }
 
 // Dropdown used on saved-book cards. currentSection null → "Add to section…"
@@ -821,110 +842,43 @@ async function createSection(name) {
 }
 
 async function renameSection(sectionId, name) {
-  try {
-    const res = await fetch(`${API}/library/sections/${sectionId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => null);
-      showError(data?.detail || "Failed to rename section");
-    }
-    return res.ok;
-  } catch {
-    return false;
-  }
+  return apiRequest(`/library/sections/${sectionId}`, {
+    method: "PATCH", body: { name }, errorMsg: "Failed to rename section",
+  });
 }
 
 async function deleteSection(sectionId) {
-  try {
-    const res = await fetch(`${API}/library/sections/${sectionId}`, { method: "DELETE" });
-    return res.ok;
-  } catch {
-    return false;
-  }
+  return apiRequest(`/library/sections/${sectionId}`, { method: "DELETE" });
 }
 
 // fromSectionId null = plain add; set = atomic move out of that section.
 async function addBookToSection(sectionId, bookId, fromSectionId = null) {
-  try {
-    const res = await fetch(`${API}/library/sections/${sectionId}/books`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ book_id: bookId, from_section_id: fromSectionId }),
-    });
-    return res.ok;
-  } catch {
-    return false;
-  }
+  return apiRequest(`/library/sections/${sectionId}/books`, {
+    body: { book_id: bookId, from_section_id: fromSectionId },
+  });
 }
 
 async function removeBookFromSection(sectionId, bookId) {
-  try {
-    const res = await fetch(
-      `${API}/library/sections/${sectionId}/books/${encodeURIComponent(bookId)}`,
-      { method: "DELETE" },
-    );
-    return res.ok;
-  } catch {
-    return false;
-  }
+  return apiRequest(
+    `/library/sections/${sectionId}/books/${encodeURIComponent(bookId)}`,
+    { method: "DELETE" },
+  );
 }
 
 async function saveToLibrary(book) {
-  try {
-    const res = await fetch(`${API}/library/add`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id: book.id, title: book.title, authors: book.authors,
-        description: book.description || "", tags: book.tags, metadata: book.metadata || {},
-      }),
-    });
-    if (!res.ok) throw new Error("Failed to save");
-    return true;
-  } catch {
-    return false;
-  }
+  return apiRequest("/library/add", { body: bookPayload(book) });
 }
 
 async function removeFromLibrary(bookId) {
-  try {
-    const res = await fetch(`${API}/library/${encodeURIComponent(bookId)}`, { method: "DELETE" });
-    if (!res.ok) throw new Error("Failed to remove");
-    return true;
-  } catch {
-    return false;
-  }
+  return apiRequest(`/library/${encodeURIComponent(bookId)}`, { method: "DELETE" });
 }
 
 async function setFeedback(book, kind) {
-  try {
-    const res = await fetch(`${API}/library/feedback`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id: book.id, title: book.title, authors: book.authors,
-        description: book.description || "", tags: book.tags,
-        metadata: book.metadata || {}, kind,
-      }),
-    });
-    return res.ok;
-  } catch {
-    return false;
-  }
+  return apiRequest("/library/feedback", { body: { ...bookPayload(book), kind } });
 }
 
 async function removeFeedback(bookId) {
-  try {
-    const res = await fetch(`${API}/library/feedback/${encodeURIComponent(bookId)}`, {
-      method: "DELETE",
-    });
-    return res.ok;
-  } catch {
-    return false;
-  }
+  return apiRequest(`/library/feedback/${encodeURIComponent(bookId)}`, { method: "DELETE" });
 }
 
 async function getLibraryRecommendations(scope = null, scopeLabel = null) {
