@@ -82,9 +82,6 @@ RemoteSource = Literal[
 app = FastAPI(title="Book Recommender API")
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
-# --- Shared state built on startup ---
-recommender: Recommender | None = None
-
 
 # ------------------------------------------------------------------ #
 # Observability — request timing + optional tracemalloc leak-finder
@@ -213,8 +210,7 @@ def _year_in_range(book, lo: int | None, hi: int | None) -> bool:
 
 @app.post("/build", summary="Build the recommendation index")
 def build_index(req: BuildRequest):
-    """Fetch books and build the similarity index."""
-    global recommender
+    """Fetch books and build the similarity index (legacy TF-IDF pipeline)."""
     fetcher = Fetcher(source=req.source)
     engine = RecommendationEngine()
     rec = Recommender(fetcher, engine)
@@ -223,9 +219,7 @@ def build_index(req: BuildRequest):
                   category=req.category)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Failed to build index: {exc}")
-    recommender = rec
-    count = len(recommender.library.all())
-    return {"status": "ok", "books_indexed": count}
+    return {"status": "ok", "books_indexed": len(rec.library.all())}
 
 
 class SearchResponse(BaseModel):
@@ -253,6 +247,20 @@ def search(
     accepted: list[tuple] = []  # (book, score)
     provider_errors: list[str] = []
 
+    def _accept(books) -> None:
+        # One accept path for both providers — dedup, year filter, score,
+        # threshold — so a filter added for one source can't miss the other.
+        for book in books:
+            dedup_key = _dedup_key(book)
+            if dedup_key in seen_keys:
+                continue
+            seen_keys.add(dedup_key)
+            if not _year_in_range(book, req.year_from, req.year_to):
+                continue
+            score = _score_book(book, query_lower, req.category)
+            if score >= THRESHOLD:
+                accepted.append((book, score))
+
     # --- 1) Google Books (up to 120 results via 3 pages of 40) ---
     gb_fetcher = Fetcher(source=GOOGLE_ENDPOINT)
     for start_idx in range(0, 120, 40):
@@ -265,16 +273,7 @@ def search(
             provider_errors.append("Google Books")
             logger.warning("Google Books search failed for query %r.", req.query, exc_info=True)
             break  # Google rate-limited or errored — continue with OL
-        for book in gb_books:
-            dedup_key = _dedup_key(book)
-            if dedup_key in seen_keys:
-                continue
-            seen_keys.add(dedup_key)
-            if not _year_in_range(book, req.year_from, req.year_to):
-                continue
-            score = _score_book(book, query_lower, req.category)
-            if score >= THRESHOLD:
-                accepted.append((book, score))
+        _accept(gb_books)
         if start_idx + 40 >= gb_total:
             break
 
@@ -296,16 +295,7 @@ def search(
             break
         if not ol_books:
             break
-        for book in ol_books:
-            dedup_key = _dedup_key(book)
-            if dedup_key in seen_keys:
-                continue
-            seen_keys.add(dedup_key)
-            if not _year_in_range(book, req.year_from, req.year_to):
-                continue
-            score = _score_book(book, query_lower, req.category)
-            if score >= THRESHOLD:
-                accepted.append((book, score))
+        _accept(ol_books)
         ol_offset += OL_BATCH
         if ol_offset >= ol_total:
             break
@@ -335,11 +325,13 @@ def search(
     )
 
 
+def _dedup_key_raw(title: str, author: str) -> str:
+    return f"{title.lower().strip()}||{author.lower().strip()}"
+
+
 def _dedup_key(book) -> str:
     """Create a dedup key from title + first author, normalised."""
-    title = book.title.lower().strip()
-    author = book.authors[0].lower().strip() if book.authors else ""
-    return f"{title}||{author}"
+    return _dedup_key_raw(book.title, book.authors[0] if book.authors else "")
 
 
 def _score_book(book, query_lower: str, category: str) -> float:
@@ -402,6 +394,26 @@ def _score_author(book, query_lower: str) -> float:
     return best
 
 
+def _popularity_signals(meta: dict) -> tuple[float, float, float, float]:
+    """Per-field popularity signals from Open Library metadata, each scaled to
+    0-1 with a log scale (diminishing returns). The single extraction point for
+    /search's genre boost (weighted sum) and _book_popularity (max), so the
+    field names and scalings can't drift between the two.
+
+    Returns (edition_count, ratings_count, ratings_average, engagement).
+    """
+    edition_count = meta.get("edition_count") or 0
+    ratings_count = meta.get("ratings_count") or 0
+    ratings_avg = meta.get("ratings_average") or 0
+    engagement = (meta.get("want_to_read_count") or 0) + (meta.get("already_read_count") or 0)
+    return (
+        min(math.log10(edition_count + 1) / 3.0, 1.0) if edition_count > 0 else 0.0,
+        min(math.log10(ratings_count + 1) / 4.0, 1.0) if ratings_count > 0 else 0.0,
+        ratings_avg / 5.0 if ratings_avg > 0 else 0.0,
+        min(math.log10(engagement + 1) / 4.0, 1.0) if engagement > 0 else 0.0,
+    )
+
+
 def _score_genre(book, query_lower: str, from_subject_search: bool = True) -> float:
     """Score by tag match + popularity boost from Open Library metadata."""
     # Bases are tuned so a clean match lands near 100 regardless of source.
@@ -434,25 +446,9 @@ def _score_genre(book, query_lower: str, from_subject_search: bool = True) -> fl
     if base == 0:
         return 0.0
 
-    # Popularity boost (up to +30 points)
-    meta = book.metadata
-    edition_count = meta.get("edition_count", 0) or 0
-    ratings_count = meta.get("ratings_count", 0) or 0
-    ratings_avg = meta.get("ratings_average", 0) or 0
-    want_to_read = meta.get("want_to_read_count", 0) or 0
-    already_read = meta.get("already_read_count", 0) or 0
-
-    # Normalize popularity signals with log scale (diminishing returns)
-    pop_score = 0.0
-    if edition_count > 0:
-        pop_score += min(math.log10(edition_count + 1) / 3.0, 1.0) * 10  # up to 10
-    if ratings_count > 0:
-        pop_score += min(math.log10(ratings_count + 1) / 4.0, 1.0) * 8   # up to 8
-    if ratings_avg > 0:
-        pop_score += (ratings_avg / 5.0) * 6                               # up to 6
-    if want_to_read + already_read > 0:
-        engagement = want_to_read + already_read
-        pop_score += min(math.log10(engagement + 1) / 4.0, 1.0) * 6       # up to 6
+    # Popularity boost (up to +30 points: 10 + 8 + 6 + 6)
+    editions, ratings, avg, engagement = _popularity_signals(book.metadata or {})
+    pop_score = editions * 10 + ratings * 8 + avg * 6 + engagement * 6
 
     return min(base + pop_score, 100.0)
 
@@ -587,52 +583,10 @@ def _gather_similar_candidates(
     # Extract title words to filter out (e.g. "harry", "potter")
     title_words = {w for w in title_lower.split() if len(w) > 2}
 
-    # Split slash- and comma-separated tags into atoms, then filter.
-    # Google Books returns categories like "Fiction / Fantasy / Action &
-    # Adventure" — searching that whole string as a subject pulls back
-    # noise (e.g. random Russian fiction) instead of clean genre matches.
-    raw_tags: list[str] = []
-    for tag in source_book.tags:  # post-enrichment, may be richer than req.tags
-        for part in re.split(r"[/,]", tag):
-            atom = part.strip()
-            if atom:
-                raw_tags.append(atom)
-
-    specific_queries: list[str] = []
-    generic_queries: list[str] = []  # fallback if no specific queries survive
-    seen_query_lower: set[str] = set()
-    for tag in raw_tags:
-        # Strip nationality/language qualifiers: "Russian fantasy" → "fantasy".
-        # Otherwise the subject search returns books *from* that country
-        # rather than books in the actual genre.
-        words = [w for w in tag.split() if w.lower() not in _LANG_QUALIFIERS]
-        if not words:
-            continue
-        cleaned = " ".join(words)
-        tag_lower = cleaned.lower()
-        # Not a genre — never a useful subject-search query. Checked on the raw
-        # (unfolded) tag, unlike _genre_atoms which folds synonyms first; safe
-        # while no noise atom is also a _GENRE_SYNONYMS key/target (add here too
-        # if that ever changes).
-        if tag_lower.rstrip(".") in _GENRE_NOISE_ATOMS:
-            continue
-        if tag_lower in seen_query_lower:
-            continue
-        tag_words_set = set(tag_lower.split())
-        # Skip if the tag is basically the title or author
-        if tag_words_set & title_words and len(tag_words_set & title_words) / max(len(tag_words_set), 1) > 0.5:
-            continue
-        if tag_words_set & author_words:
-            continue
-        seen_query_lower.add(tag_lower)
-        # "Fiction", "Literature", etc. on their own return mostly classics
-        # via OL's subject search — only use them if nothing specific exists.
-        if tag_lower in _GENERIC_GENRE_TAGS:
-            generic_queries.append(cleaned)
-        else:
-            specific_queries.append(cleaned)
-
-    genre_queries = specific_queries or generic_queries
+    genre_queries = _similar_genre_queries(
+        source_book.tags,  # post-enrichment, may be richer than req.tags
+        title_words, author_words,
+    )
     if not genre_queries:
         # No usable tags at all — scan title + description for a known genre
         # keyword (same fallback the display layer uses) before surrendering
@@ -643,7 +597,8 @@ def _gather_similar_candidates(
     # Up to 5 atom queries — slash-splitting often produces more useful atoms.
     genre_queries = genre_queries[:5]
 
-    # --- 2) Fetch candidates using genre queries ---
+    # --- 2) Fetch candidates using genre queries (concurrently, mirroring
+    # /library/recommend — Open Library subject searches are slow) ---
     all_books = []
     seen_keys: set[str] = set()
     source_key = _dedup_key_raw(req.title, req.authors[0] if req.authors else "")
@@ -652,39 +607,19 @@ def _gather_similar_candidates(
     # Words to check for "about the source" filtering
     filter_words = title_words | author_words
 
-    gb_fetcher = Fetcher(source=GOOGLE_ENDPOINT)
-    ol_fetcher = Fetcher(source=OPENLIB_ENDPOINT)
-
-    for query in genre_queries:
-        # Google Books — top 40 most relevant
-        try:
-            gb_books, _ = gb_fetcher.fetch_google_page(
-                query, max_results=40, category="genre",
-            )
-            for b in gb_books:
-                if _is_about_source(b, filter_words):
-                    continue
-                dk = _dedup_key(b)
-                if dk not in seen_keys:
-                    seen_keys.add(dk)
-                    all_books.append(b)
-        except Exception:
-            logger.warning("Google Books similar-book fetch failed for query %r.", query, exc_info=True)
-
-        # Open Library — wider net since OL is where the long tail lives
-        try:
-            ol_books, _ = ol_fetcher.fetch_page(
-                query, batch_size=300, category="genre",
-            )
-            for b in ol_books:
-                if _is_about_source(b, filter_words):
-                    continue
-                dk = _dedup_key(b)
-                if dk not in seen_keys:
-                    seen_keys.add(dk)
-                    all_books.append(b)
-        except Exception:
-            logger.warning("Open Library similar-book fetch failed for query %r.", query, exc_info=True)
+    with ThreadPoolExecutor(max_workers=min(8, len(genre_queries))) as ex:
+        # OL batch 300 (vs recommend's default 200): a single source book gets
+        # fewer queries, so each casts a wider net into OL's long tail.
+        fetched = list(ex.map(
+            lambda q: _fetch_genre_candidates(q, ol_batch=300), genre_queries))
+    for books in fetched:
+        for b in books:
+            if _is_about_source(b, filter_words):
+                continue
+            dk = _dedup_key(b)
+            if dk not in seen_keys:
+                seen_keys.add(dk)
+                all_books.append(b)
 
     if not all_books:
         return source_book, src_lang, []
@@ -788,23 +723,10 @@ _GENERIC_GENRE_TAGS = {
 
 
 def _book_popularity(book: Books) -> float:
-    """0-1 popularity proxy from Open Library metadata. 0 when unavailable."""
-    meta = book.metadata or {}
-    edition_count = meta.get("edition_count") or 0
-    ratings_count = meta.get("ratings_count") or 0
-    ratings_avg = meta.get("ratings_average") or 0
-    engagement = (meta.get("want_to_read_count") or 0) + (meta.get("already_read_count") or 0)
-
-    score = 0.0
-    if edition_count > 0:
-        score = max(score, min(math.log10(edition_count + 1) / 3.0, 1.0))
-    if ratings_count > 0:
-        score = max(score, min(math.log10(ratings_count + 1) / 4.0, 1.0))
-    if ratings_avg > 0:
-        score = max(score, ratings_avg / 5.0)
-    if engagement > 0:
-        score = max(score, min(math.log10(engagement + 1) / 4.0, 1.0))
-    return score
+    """0-1 popularity proxy from Open Library metadata. 0 when unavailable.
+    Takes the strongest single signal (max, not a sum — see _popularity_signals
+    for the field extraction shared with /search's genre boost)."""
+    return max(_popularity_signals(book.metadata or {}))
 
 
 def _fold_token(tok: str) -> str:
@@ -1033,10 +955,6 @@ def _is_about_source(book, filter_words: set) -> bool:
     # If 2+ filter words appear in the title, it's likely about the source
     matches = title_word_set & filter_words
     return len(matches) >= 2
-
-
-def _dedup_key_raw(title: str, author: str) -> str:
-    return f"{title.lower().strip()}||{author.lower().strip()}"
 
 
 # ------------------------------------------------------------------ #
@@ -1521,33 +1439,54 @@ _FACET_DROP = {"series", "person", "place", "time", "award", "character",
 _FACET_RE = re.compile(r"^([a-z]+)\s*:\s*(.+)$", re.IGNORECASE)
 
 
+def _tag_atoms(tag: str) -> list[str]:
+    """Split one raw tag into cleaned atom strings, original case kept.
+
+    The shared cleanup steps: slash/comma splitting (Google Books returns
+    categories like "Fiction / Fantasy / Action & Adventure"), Open Library
+    facet prefixes (stripped for genre:/subject:/form:, dropped for
+    series:/person:/etc.), nationality/language qualifiers ("Russian fantasy"
+    → "fantasy" — otherwise a subject search returns books *from* that country
+    rather than the genre), and trailing periods ("fantasy fiction."). One
+    implementation under both _genre_atoms (scoring) and
+    _similar_genre_queries (/similar's subject searches) so the two paths
+    can't drift — the query path historically missed the facet handling and
+    burned search slots on "series:Dungeon Crawler Carl".
+    """
+    atoms: list[str] = []
+    for part in re.split(r"[/,]", tag):
+        atom = part.strip()
+        if not atom:
+            continue
+        facet = _FACET_RE.match(atom)
+        if facet:
+            prefix = facet.group(1).lower()
+            if prefix in _FACET_DROP:
+                continue
+            if prefix in _FACET_KEEP:
+                atom = facet.group(2).strip()
+        words = [w for w in atom.split() if w.lower() not in _LANG_QUALIFIERS]
+        if not words:
+            continue
+        cleaned = " ".join(words).rstrip(".")
+        if cleaned:
+            atoms.append(cleaned)
+    return atoms
+
+
 def _genre_atoms(tags: list[str]) -> tuple[list[str], list[str]]:
     """Split tags into cleaned (specific, generic) genre atoms, lowercased.
 
     "Fiction / Fantasy / Action & Adventure" → specific ["fantasy",
-    "action & adventure"], generic ["fiction"]. Nationality/language qualifiers
-    are dropped so "Russian fantasy" reduces to "fantasy", and Open Library
-    facet prefixes are stripped ("genre:litrpg" → "litrpg") or dropped
-    ("series:..." → skipped).
+    "action & adventure"], generic ["fiction"]. Atom cleanup (facet prefixes,
+    language qualifiers, trailing periods) lives in _tag_atoms; this layer
+    adds synonym folding and the noise-atom drop, then buckets by specificity.
     """
     specific: list[str] = []
     generic: list[str] = []
     for tag in tags:
-        for part in re.split(r"[/,]", tag):
-            atom = part.strip()
-            if not atom:
-                continue
-            facet = _FACET_RE.match(atom)
-            if facet:
-                prefix = facet.group(1).lower()
-                if prefix in _FACET_DROP:
-                    continue
-                if prefix in _FACET_KEEP:
-                    atom = facet.group(2).strip()
-            words = [w for w in atom.split() if w.lower() not in _LANG_QUALIFIERS]
-            if not words:
-                continue
-            key = " ".join(words).lower().rstrip(".")  # OL tags like "fantasy fiction."
+        for atom in _tag_atoms(tag):
+            key = atom.lower()
             key = _GENRE_SYNONYMS.get(key, key)
             if key in _GENRE_NOISE_ATOMS:
                 continue  # award/marketing label or topical subject — not a genre
@@ -1556,6 +1495,46 @@ def _genre_atoms(tags: list[str]) -> tuple[list[str], list[str]]:
             else:
                 specific.append(key)
     return specific, generic
+
+
+def _similar_genre_queries(
+    tags: list[str], title_words: set[str], author_words: set[str],
+) -> list[str]:
+    """Build /similar's genre subject-search queries from the source's tags.
+
+    Atom cleanup is shared with _genre_atoms via _tag_atoms; on top of that,
+    atoms that are basically the source's title or author are skipped (they'd
+    fetch books *about* the source), and generic tags ("Fiction",
+    "Literature") are used only when nothing specific survives — on their own
+    they return mostly classics via OL's subject search. Original case is
+    kept for the outgoing queries. Returns [] when no usable tag exists.
+    """
+    specific: list[str] = []
+    generic: list[str] = []
+    seen_lower: set[str] = set()
+    for tag in tags:
+        for atom in _tag_atoms(tag):
+            atom_lower = atom.lower()
+            # Not a genre — never a useful subject-search query. Checked on the
+            # raw (unfolded) atom, unlike _genre_atoms which folds synonyms
+            # first; safe while no noise atom is also a _GENRE_SYNONYMS
+            # key/target (add here too if that ever changes).
+            if atom_lower in _GENRE_NOISE_ATOMS:
+                continue
+            if atom_lower in seen_lower:
+                continue
+            atom_words = set(atom_lower.split())
+            # Skip if the atom is basically the title or author.
+            if atom_words & title_words and len(atom_words & title_words) / max(len(atom_words), 1) > 0.5:
+                continue
+            if atom_words & author_words:
+                continue
+            seen_lower.add(atom_lower)
+            if atom_lower in _GENERIC_GENRE_TAGS:
+                generic.append(atom)
+            else:
+                specific.append(atom)
+    return specific or generic
 
 
 def _library_genre_profile(
@@ -1908,6 +1887,22 @@ def _swap_to_entry_points(
         return list(ex.map(_resolve, entries))
 
 
+def _apply_work_detail(book: Books, desc: str, subjects: list[str]) -> bool:
+    """Apply an OL work-detail fetch to a book, in place: subjects only when
+    the book has no tags yet, the description only when it's longer than what
+    the book already carries. Returns True if anything changed. Shared by
+    _ensure_details and _enrich_tagless_candidates so the guards can't drift.
+    """
+    changed = False
+    if subjects and not book.tags:
+        book.tags = subjects[:5]
+        changed = True
+    if desc and len(desc) > len(book.description):
+        book.description = desc
+        changed = True
+    return changed
+
+
 def _ensure_details(book: Books) -> bool:
     """Fill in a book's language and (for sparse Open Library works) its genres
     and full description from work detail. Mutates in place; returns True if
@@ -1924,11 +1919,7 @@ def _ensure_details(book: Books) -> bool:
     if book.id.startswith("ol_/works/") and (not book.tags or len(book.description) < 60):
         desc, subjects = Fetcher(source=OPENLIB_ENDPOINT).fetch_work_detail(
             book.id[len("ol_"):])
-        if subjects and not book.tags:
-            book.tags = subjects[:5]
-            changed = True
-        if desc and len(desc) > len(book.description):
-            book.description = desc
+        if _apply_work_detail(book, desc, subjects):
             changed = True
     return changed
 
@@ -1970,10 +1961,7 @@ def _enrich_tagless_candidates(candidates: list[Books], saved: list[Books]) -> N
 
     def _enrich(book: Books) -> None:
         desc, subjects = detail_fetcher.fetch_work_detail(book.id[len("ol_"):])
-        if subjects:
-            book.tags = subjects[:5]
-        if desc and len(desc) > len(book.description):
-            book.description = desc
+        _apply_work_detail(book, desc, subjects)
 
     try:
         with ThreadPoolExecutor(max_workers=_ENRICH_WORKERS) as ex:
@@ -2004,21 +1992,25 @@ def _recommendation_exclusions(
     return keys, titles
 
 
-def _fetch_genre_candidates(query: str) -> list[Books]:
-    """Fetch Google Books + Open Library results for one genre query."""
+def _fetch_genre_candidates(query: str, ol_batch: int = 200) -> list[Books]:
+    """Fetch Google Books + Open Library results for one genre query.
+
+    Warn-and-continue per provider so one failing source doesn't empty the
+    pool. Shared by /library/recommend (default batch) and /similar
+    (ol_batch=300)."""
     out: list[Books] = []
     try:
         gb_books, _ = Fetcher(source=GOOGLE_ENDPOINT).fetch_google_page(
             query, max_results=40, category="genre")
         out.extend(gb_books)
     except Exception:
-        logger.warning("Google Books library recommendation fetch failed for query %r.", query, exc_info=True)
+        logger.warning("Google Books genre fetch failed for query %r.", query, exc_info=True)
     try:
         ol_books, _ = Fetcher(source=OPENLIB_ENDPOINT).fetch_page(
-            query, batch_size=200, category="genre")
+            query, batch_size=ol_batch, category="genre")
         out.extend(ol_books)
     except Exception:
-        logger.warning("Open Library library recommendation fetch failed for query %r.", query, exc_info=True)
+        logger.warning("Open Library genre fetch failed for query %r.", query, exc_info=True)
     return out
 
 
