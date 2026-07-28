@@ -1,12 +1,11 @@
 """
 server/fetcher/fetcher.py
-Fetch book data from a local JSON file, Google Books, or Open Library
-and return them as `Books` instances.
+Fetch book data from Google Books or Open Library and return them as
+`Books` instances.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import threading
@@ -136,10 +135,9 @@ class Fetcher:
     Parameters
     ----------
     source : str
-        Either a **filepath** (for local JSON) or one of the endpoint
-        constants above.
+        One of the endpoint constants above (Google Books / Open Library).
     api_key : str | None
-        Optional Google Books API key.  Unused for local/ Open Library.
+        Optional Google Books API key.  Unused for Open Library.
     """
 
     def __init__(self, source: str, api_key: Optional[str] = None):
@@ -152,14 +150,14 @@ class Fetcher:
 
     def fetch(self, query: str | None = None, max_results: int = 40,
               category: str = "general") -> List[Books]:
-        if self.source in (GOOGLE_ENDPOINT, OPENLIB_ENDPOINT):
-            if not query:
-                raise ValueError("`query` is required when fetching remotely.")
-            if self.source == GOOGLE_ENDPOINT:
-                return self._fetch_google_books(query, max_results, category=category)
-            books, _ = self._fetch_open_library(query, max_results, category=category)
-            return books
-        return self._fetch_from_file()
+        if self.source not in (GOOGLE_ENDPOINT, OPENLIB_ENDPOINT):
+            raise ValueError(f"Unknown fetch source: {self.source!r}")
+        if not query:
+            raise ValueError("`query` is required when fetching remotely.")
+        if self.source == GOOGLE_ENDPOINT:
+            return self._fetch_google_books(query, max_results, category=category)
+        books, _ = self._fetch_open_library(query, max_results, category=category)
+        return books
 
     def fetch_page(self, query: str, batch_size: int = 500,
                    offset: int = 0, category: str = "general"):
@@ -202,26 +200,6 @@ class Fetcher:
         if not isinstance(subjects, list):
             subjects = []
         return desc, [str(s) for s in subjects]
-
-    # ------------------------------------------------------------------ #
-    # Local JSON
-    # ------------------------------------------------------------------ #
-
-    def _fetch_from_file(self) -> List[Books]:
-        with open(self.source, "r", encoding="utf-8") as fh:
-            raw = json.load(fh)
-        return [self._from_local_dict(obj) for obj in raw]
-
-    @staticmethod
-    def _from_local_dict(raw: dict) -> Books:
-        return Books(
-            id=raw["id"],
-            title=raw["title"],
-            authors=raw.get("authors", []),
-            description=raw.get("description", ""),
-            tags=raw.get("tags", []),
-            metadata=raw.get("metadata", {}),
-        )
 
     # ------------------------------------------------------------------ #
     # Google Books

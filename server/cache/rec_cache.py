@@ -33,7 +33,10 @@ from typing import Any, Callable, Iterable
 #     re-weighting — all change recommendation ranking/output.
 # v8: reader-note/review text (e.g. "...gmb 3/15/20") dropped from Open Library
 #     descriptions at ingestion, changing both display blurbs and scoring tokens.
-CACHE_VERSION = 8
+# v9: /similar's genre queries now share _genre_atoms' tag cleanup (facet
+#     prefixes dropped, trailing periods stripped, "Fiction." recognised as
+#     generic), changing /similar's candidate pools and therefore its results.
+CACHE_VERSION = 9
 
 
 class RecommendationCache:
