@@ -3,99 +3,64 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
-from contextlib import contextmanager
-from pathlib import Path
-from typing import Iterator
 
 from server.models.book import Books
-
-_DEFAULT_DB_PATH = (
-    Path(__file__).resolve().parent.parent.parent / "data" / "library.db"
-)
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS library_entries (
-    user_id     TEXT NOT NULL,
-    book_id     TEXT NOT NULL,
-    title       TEXT NOT NULL,
-    authors     TEXT NOT NULL DEFAULT '[]',
-    description TEXT NOT NULL DEFAULT '',
-    tags        TEXT NOT NULL DEFAULT '[]',
-    metadata    TEXT NOT NULL DEFAULT '{}',
-    added_at    INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-    reading_status TEXT,  -- 'want_to_read' | 'reading' | 'read' | NULL
-    PRIMARY KEY (user_id, book_id)
-);
-CREATE INDEX IF NOT EXISTS idx_library_user_added
-    ON library_entries(user_id, added_at DESC);
-
--- User-defined shelves within a library. Membership is many-to-many so one
--- book can sit in several sections and "recommend from these picked books"
--- is just an unsaved membership set.
-CREATE TABLE IF NOT EXISTS library_sections (
-    section_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id     TEXT NOT NULL,
-    name        TEXT NOT NULL,
-    created_at  INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-    UNIQUE (user_id, name)
-);
-CREATE TABLE IF NOT EXISTS section_books (
-    section_id  INTEGER NOT NULL,
-    user_id     TEXT NOT NULL,
-    book_id     TEXT NOT NULL,
-    added_at    INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-    PRIMARY KEY (section_id, book_id)
-);
-CREATE INDEX IF NOT EXISTS idx_section_books_user_book
-    ON section_books(user_id, book_id);
-"""
+from server.storage._base import SQLiteStore, row_to_book
 
 
 class SectionNameTakenError(Exception):
     """A section with this name already exists for the user."""
 
 
-def _resolve_db_path() -> Path:
-    env = os.environ.get("BOOKREC_DB_PATH")
-    return Path(env) if env else _DEFAULT_DB_PATH
-
-
-class LibraryStore:
+class LibraryStore(SQLiteStore):
     """Thread-safe SQLite library store. One row per (user_id, book_id)."""
 
-    def __init__(self, db_path: Path | None = None) -> None:
-        self.db_path = Path(db_path) if db_path else _resolve_db_path()
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
+    _SCHEMA = """
+    CREATE TABLE IF NOT EXISTS library_entries (
+        user_id     TEXT NOT NULL,
+        book_id     TEXT NOT NULL,
+        title       TEXT NOT NULL,
+        authors     TEXT NOT NULL DEFAULT '[]',
+        description TEXT NOT NULL DEFAULT '',
+        tags        TEXT NOT NULL DEFAULT '[]',
+        metadata    TEXT NOT NULL DEFAULT '{}',
+        added_at    INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+        reading_status TEXT,  -- 'want_to_read' | 'reading' | 'read' | NULL
+        PRIMARY KEY (user_id, book_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_library_user_added
+        ON library_entries(user_id, added_at DESC);
 
-    @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.row_factory = sqlite3.Row
-        try:
-            with conn:
-                yield conn
-        finally:
-            conn.close()
+    -- User-defined shelves within a library. Membership is many-to-many so one
+    -- book can sit in several sections and "recommend from these picked books"
+    -- is just an unsaved membership set.
+    CREATE TABLE IF NOT EXISTS library_sections (
+        section_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     TEXT NOT NULL,
+        name        TEXT NOT NULL,
+        created_at  INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+        UNIQUE (user_id, name)
+    );
+    CREATE TABLE IF NOT EXISTS section_books (
+        section_id  INTEGER NOT NULL,
+        user_id     TEXT NOT NULL,
+        book_id     TEXT NOT NULL,
+        added_at    INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+        PRIMARY KEY (section_id, book_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_section_books_user_book
+        ON section_books(user_id, book_id);
+    """
 
-    def _init_schema(self) -> None:
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        try:
-            conn.execute("PRAGMA journal_mode = WAL")
-            conn.execute("PRAGMA synchronous = NORMAL")
-            conn.executescript(_SCHEMA)
-            # Migration for DBs created before reading status existed —
-            # CREATE TABLE IF NOT EXISTS won't add columns to an old table.
-            cols = {r[1] for r in conn.execute("PRAGMA table_info(library_entries)")}
-            if "reading_status" not in cols:
-                conn.execute(
-                    "ALTER TABLE library_entries ADD COLUMN reading_status TEXT"
-                )
-            conn.commit()
-        finally:
-            conn.close()
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        # Migration for DBs created before reading status existed —
+        # CREATE TABLE IF NOT EXISTS won't add columns to an old table.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(library_entries)")}
+        if "reading_status" not in cols:
+            conn.execute(
+                "ALTER TABLE library_entries ADD COLUMN reading_status TEXT"
+            )
 
     def add(self, user_id: str, book: Books) -> None:
         with self._connect() as conn:
@@ -141,7 +106,7 @@ class LibraryStore:
                 "SELECT * FROM library_entries WHERE user_id = ? AND book_id = ?",
                 (user_id, book_id),
             ).fetchone()
-        return _row_to_book(row) if row else None
+        return row_to_book(row) if row else None
 
     def all(self, user_id: str) -> list[Books]:
         with self._connect() as conn:
@@ -153,7 +118,7 @@ class LibraryStore:
                 """,
                 (user_id,),
             ).fetchall()
-        return [_row_to_book(r) for r in rows]
+        return [row_to_book(r) for r in rows]
 
     # ------------------------------------------------------------------ #
     # Reading status — want_to_read / reading / read (or unset), one per
@@ -350,15 +315,4 @@ class LibraryStore:
                 """,
                 (section_id, user_id),
             ).fetchall()
-        return [_row_to_book(r) for r in rows]
-
-
-def _row_to_book(row: sqlite3.Row) -> Books:
-    return Books(
-        id=row["book_id"],
-        title=row["title"],
-        authors=json.loads(row["authors"]),
-        description=row["description"],
-        tags=json.loads(row["tags"]),
-        metadata=json.loads(row["metadata"]),
-    )
+        return [row_to_book(r) for r in rows]

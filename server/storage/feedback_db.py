@@ -13,70 +13,33 @@ mind without leaving stale entries behind.
 from __future__ import annotations
 
 import json
-import os
-import sqlite3
-from contextlib import contextmanager
-from pathlib import Path
-from typing import Iterator, Literal
+from typing import Literal
 
 from server.models.book import Books
+from server.storage._base import SQLiteStore, row_to_book
 
 FeedbackKind = Literal["up", "down"]
 
-_DEFAULT_DB_PATH = (
-    Path(__file__).resolve().parent.parent.parent / "data" / "library.db"
-)
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS feedback_entries (
-    user_id     TEXT NOT NULL,
-    book_id     TEXT NOT NULL,
-    kind        TEXT NOT NULL CHECK (kind IN ('up', 'down')),
-    title       TEXT NOT NULL,
-    authors     TEXT NOT NULL DEFAULT '[]',
-    description TEXT NOT NULL DEFAULT '',
-    tags        TEXT NOT NULL DEFAULT '[]',
-    metadata    TEXT NOT NULL DEFAULT '{}',
-    added_at    INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-    PRIMARY KEY (user_id, book_id)
-);
-CREATE INDEX IF NOT EXISTS idx_feedback_user_kind_added
-    ON feedback_entries(user_id, kind, added_at DESC);
-"""
-
-
-def _resolve_db_path() -> Path:
-    env = os.environ.get("BOOKREC_DB_PATH")
-    return Path(env) if env else _DEFAULT_DB_PATH
-
-
-class FeedbackStore:
+class FeedbackStore(SQLiteStore):
     """Thread-safe SQLite feedback store. One row per (user_id, book_id)."""
 
-    def __init__(self, db_path: Path | None = None) -> None:
-        self.db_path = Path(db_path) if db_path else _resolve_db_path()
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
-
-    @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.row_factory = sqlite3.Row
-        try:
-            with conn:
-                yield conn
-        finally:
-            conn.close()
-
-    def _init_schema(self) -> None:
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        try:
-            conn.execute("PRAGMA journal_mode = WAL")
-            conn.execute("PRAGMA synchronous = NORMAL")
-            conn.executescript(_SCHEMA)
-            conn.commit()
-        finally:
-            conn.close()
+    _SCHEMA = """
+    CREATE TABLE IF NOT EXISTS feedback_entries (
+        user_id     TEXT NOT NULL,
+        book_id     TEXT NOT NULL,
+        kind        TEXT NOT NULL CHECK (kind IN ('up', 'down')),
+        title       TEXT NOT NULL,
+        authors     TEXT NOT NULL DEFAULT '[]',
+        description TEXT NOT NULL DEFAULT '',
+        tags        TEXT NOT NULL DEFAULT '[]',
+        metadata    TEXT NOT NULL DEFAULT '{}',
+        added_at    INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+        PRIMARY KEY (user_id, book_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_feedback_user_kind_added
+        ON feedback_entries(user_id, kind, added_at DESC);
+    """
 
     def set(self, user_id: str, book: Books, kind: FeedbackKind) -> None:
         """Record or update feedback for a book. Overwrites any prior opinion."""
@@ -138,24 +101,14 @@ class FeedbackStore:
         query += " ORDER BY added_at DESC"
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
-        return [(_row_to_book(r), r["kind"]) for r in rows]
+        return [(row_to_book(r), r["kind"]) for r in rows]
 
     def ids(self, user_id: str, kind: FeedbackKind) -> list[str]:
-        """Cheap path for cache-signature use: just the book IDs of one kind."""
+        """Book IDs of one feedback kind, without the payloads. (The app now
+        derives cache-signature IDs from all(); kept as a cheap query path.)"""
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT book_id FROM feedback_entries WHERE user_id = ? AND kind = ?",
                 (user_id, kind),
             ).fetchall()
         return [r["book_id"] for r in rows]
-
-
-def _row_to_book(row: sqlite3.Row) -> Books:
-    return Books(
-        id=row["book_id"],
-        title=row["title"],
-        authors=json.loads(row["authors"]),
-        description=row["description"],
-        tags=json.loads(row["tags"]),
-        metadata=json.loads(row["metadata"]),
-    )

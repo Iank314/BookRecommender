@@ -9,59 +9,21 @@ and a timestamp. No queries, titles, or IPs are stored.
 
 from __future__ import annotations
 
-import os
-import sqlite3
-from contextlib import contextmanager
-from pathlib import Path
-from typing import Iterator
-
-_DEFAULT_DB_PATH = (
-    Path(__file__).resolve().parent.parent.parent / "data" / "library.db"
-)
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS activity_log (
-    kind    TEXT NOT NULL,            -- 'search' | 'similar' | 'recommend'
-    user_id TEXT,                     -- NULL for anonymous requests
-    at      INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
-);
-CREATE INDEX IF NOT EXISTS idx_activity_at ON activity_log(at);
-CREATE INDEX IF NOT EXISTS idx_activity_kind_at ON activity_log(kind, at);
-"""
+from server.storage._base import SQLiteStore
 
 
-def _resolve_db_path() -> Path:
-    env = os.environ.get("BOOKREC_DB_PATH")
-    return Path(env) if env else _DEFAULT_DB_PATH
-
-
-class ActivityStore:
+class ActivityStore(SQLiteStore):
     """Thread-safe append-mostly event log."""
 
-    def __init__(self, db_path: Path | None = None) -> None:
-        self.db_path = Path(db_path) if db_path else _resolve_db_path()
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
-
-    @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.row_factory = sqlite3.Row
-        try:
-            with conn:
-                yield conn
-        finally:
-            conn.close()
-
-    def _init_schema(self) -> None:
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        try:
-            conn.execute("PRAGMA journal_mode = WAL")
-            conn.execute("PRAGMA synchronous = NORMAL")
-            conn.executescript(_SCHEMA)
-            conn.commit()
-        finally:
-            conn.close()
+    _SCHEMA = """
+    CREATE TABLE IF NOT EXISTS activity_log (
+        kind    TEXT NOT NULL,            -- 'search' | 'similar' | 'recommend'
+        user_id TEXT,                     -- NULL for anonymous requests
+        at      INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_activity_at ON activity_log(at);
+    CREATE INDEX IF NOT EXISTS idx_activity_kind_at ON activity_log(kind, at);
+    """
 
     def record(self, kind: str, user_id: str | None = None) -> None:
         with self._connect() as conn:

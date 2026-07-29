@@ -16,19 +16,14 @@ class Recommender:
         self.extractor    = FeatureExtractor()
         self.engine       = engine
 
-    # --------------------------------------------------------------
-    # NOTE: *source* is now optional.  Most remote workflows ignore it
-    # because the Fetcher already knows its endpoint; local‐file builds
-    # will still pass a path.
-    # --------------------------------------------------------------
     def build(self, source: str | None = None, **fetch_kwargs):
         """Populate the library and fit the similarity index.
 
         Parameters
         ----------
         source : str | None
-            For *local* JSON builds, pass the file path.  For remote
-            endpoints (Google Books / Open Library), leave this as None.
+            Optional endpoint override for the fetcher; usually None because
+            the Fetcher already knows its endpoint.
         **fetch_kwargs
             Passed straight through to `Fetcher.fetch(...)`, e.g.
             `query="fantasy", max_results=40`.

@@ -3,31 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import secrets
 import sqlite3
-from contextlib import contextmanager
-from pathlib import Path
-from typing import Iterator
 
-_DEFAULT_DB_PATH = (
-    Path(__file__).resolve().parent.parent.parent / "data" / "library.db"
-)
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS users (
-    user_id       TEXT PRIMARY KEY,
-    username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
-    password_hash TEXT NOT NULL,
-    created_at    INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
-);
-CREATE TABLE IF NOT EXISTS sessions (
-    token      TEXT PRIMARY KEY,
-    user_id    TEXT NOT NULL,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
-);
-CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
-"""
+from server.storage._base import SQLiteStore
 
 # PBKDF2 cost. High enough to slow brute force, cheap enough for a login request.
 _PBKDF2_ROUNDS = 200_000
@@ -35,11 +14,6 @@ _PBKDF2_ROUNDS = 200_000
 
 class UsernameTakenError(Exception):
     """Raised when registering a username that already exists."""
-
-
-def _resolve_db_path() -> Path:
-    env = os.environ.get("BOOKREC_DB_PATH")
-    return Path(env) if env else _DEFAULT_DB_PATH
 
 
 def _hash_password(password: str, salt: str | None = None) -> str:
@@ -59,39 +33,31 @@ def _verify_password(password: str, stored: str) -> bool:
     return secrets.compare_digest(_hash_password(password, salt), stored)
 
 
-class UserStore:
+class UserStore(SQLiteStore):
     """Thread-safe SQLite store for user accounts and session tokens."""
 
-    def __init__(self, db_path: Path | None = None) -> None:
-        self.db_path = Path(db_path) if db_path else _resolve_db_path()
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
+    _SCHEMA = """
+    CREATE TABLE IF NOT EXISTS users (
+        user_id       TEXT PRIMARY KEY,
+        username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        password_hash TEXT NOT NULL,
+        created_at    INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+    );
+    CREATE TABLE IF NOT EXISTS sessions (
+        token      TEXT PRIMARY KEY,
+        user_id    TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+    """
 
-    @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.row_factory = sqlite3.Row
-        try:
-            with conn:
-                yield conn
-        finally:
-            conn.close()
-
-    def _init_schema(self) -> None:
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        try:
-            conn.execute("PRAGMA journal_mode = WAL")
-            conn.execute("PRAGMA synchronous = NORMAL")
-            conn.executescript(_SCHEMA)
-            # Migration for DBs created before the admin flag existed.
-            cols = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
-            if "is_admin" not in cols:
-                conn.execute(
-                    "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
-                )
-            conn.commit()
-        finally:
-            conn.close()
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        # Migration for DBs created before the admin flag existed.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
+        if "is_admin" not in cols:
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
+            )
 
     def create_user(self, username: str, password: str) -> str:
         """Create an account and return its user_id. Raises UsernameTakenError."""
