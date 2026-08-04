@@ -890,6 +890,154 @@ main {
   text-decoration: underline;
 }
 
+.site-footer p + p {
+  margin-top: 0.5rem;
+}
+
+/* Button that reads as a link — the footer entry point to the user manual. */
+.footer-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: #7986cb;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.footer-link:hover {
+  text-decoration: underline;
+}
+
+/* ---- User manual ----
+   Same overlay treatment as the auth modal, but the card is wider and scrolls
+   internally; each feature is a collapsible <details> so the list stays
+   scannable. Content lives in index.html. */
+#help-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  z-index: 110;
+  padding: 2rem 1rem;
+  overflow-y: auto;
+}
+
+.help-card {
+  position: relative;
+  width: 100%;
+  max-width: 640px;
+  max-height: 86vh;
+  overflow-y: auto;
+  background: #1a1c24;
+  border: 1px solid #2a2d35;
+  border-radius: 12px;
+  padding: 2rem 1.8rem;
+}
+
+.help-card h2 {
+  color: #fff;
+  font-size: 1.35rem;
+  margin-bottom: 0.8rem;
+}
+
+.help-lede {
+  color: #8b8d97;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  margin-bottom: 1.1rem;
+}
+
+.help-quickstart {
+  background: #0f1117;
+  border: 1px solid #2a2d35;
+  border-radius: 8px;
+  padding: 0.9rem 1rem;
+  margin-bottom: 0.6rem;
+  font-size: 0.88rem;
+  color: #e1e2e6;
+}
+
+.help-quickstart strong {
+  display: block;
+  margin-bottom: 0.5rem;
+  color: #7986cb;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+.help-quickstart ol {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.help-quickstart li {
+  margin-bottom: 0.3rem;
+  line-height: 1.55;
+}
+
+.help-section {
+  border-top: 1px solid #2a2d35;
+  padding: 0.55rem 0;
+}
+
+.help-section summary {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #e1e2e6;
+  cursor: pointer;
+  list-style: none;
+}
+
+.help-section summary::-webkit-details-marker {
+  display: none;
+}
+
+.help-section summary::after {
+  content: "\25BC";
+  margin-left: auto;
+  font-size: 0.7rem;
+  color: #8b8d97;
+  transition: transform 0.2s;
+}
+
+.help-section[open] summary::after {
+  transform: rotate(180deg);
+}
+
+.help-section summary:hover {
+  color: #7986cb;
+}
+
+.help-section ul {
+  margin: 0.5rem 0 0.4rem;
+  padding-left: 1.15rem;
+}
+
+.help-section li {
+  margin-bottom: 0.45rem;
+  font-size: 0.87rem;
+  line-height: 1.6;
+  color: #a9abb6;
+}
+
+.help-section li strong {
+  color: #e1e2e6;
+}
+
+.help-section li em {
+  color: #7986cb;
+  font-style: normal;
+  font-weight: 600;
+}
+
 /* ---- Year filter row ---- */
 .year-filter {
   display: flex;
@@ -1032,6 +1180,28 @@ body.light .library-view { color: #3a7c3a; border-color: #cfe2cf; }
 body.light .library-view.active,
 body.light .library-view.active:hover { background: #3a7c3a; color: #fff; }
 body.light .library-view:hover { background: #d9ead9; color: #2a5c2a; }
+
+body.light .help-card {
+  background: #ffffff;
+  border-color: #d8dae2;
+}
+
+body.light .help-card h2 { color: #24262e; }
+body.light .help-lede { color: #5a5d6b; }
+body.light .help-section { border-color: #e2e4ec; }
+body.light .help-section summary { color: #24262e; }
+body.light .help-section summary:hover { color: #3f51b5; }
+body.light .help-section li { color: #5a5d6b; }
+body.light .help-section li strong { color: #24262e; }
+body.light .help-section li em { color: #3f51b5; }
+
+body.light .help-quickstart {
+  background: #f4f4f7;
+  border-color: #d8dae2;
+  color: #24262e;
+}
+
+body.light .help-quickstart strong { color: #3f51b5; }
 
 body.light .stats-table th { color: #8b8d97; }
 body.light .stats-table td { color: #24262e; border-color: #d8dae2; }

@@ -6,13 +6,14 @@
   <title>Book Recommender</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📚</text></svg>" />
   <!-- ?v= busts browser caches on deploy — bump it whenever app.js/style.css change. -->
-  <link rel="stylesheet" href="/static/style.css?v=13" />
+  <link rel="stylesheet" href="/static/style.css?v=14" />
 </head>
 <body>
   <header>
     <div id="auth-bar">
       <span id="auth-status"></span>
       <button type="button" id="theme-toggle" class="auth-btn" title="Toggle light/dark mode">☀️</button>
+      <button type="button" id="help-btn" class="auth-btn" title="How to use Book Recommender">❓ Help</button>
       <button type="button" id="admin-stats-btn" class="auth-btn hidden">📊 Stats</button>
       <button type="button" id="auth-login-btn" class="auth-btn hidden">Log in</button>
       <button type="button" id="auth-logout-btn" class="auth-btn hidden">Log out</button>
@@ -64,12 +65,178 @@
 
   <footer class="site-footer">
     <p>
+      <button type="button" id="help-link" class="footer-link">📖 User manual</button>
+    </p>
+    <p>
       Have a suggestion or found a bug?
       <a href="mailto:kaufmanian49@gmail.com?subject=Book%20Recommender%20Suggestion">
         kaufmanian49@gmail.com
       </a>
     </p>
   </footer>
+
+  <!-- User manual. Static content: every feature the UI exposes, in the order a
+       new user meets them. Keep in sync when the frontend grows a feature. -->
+  <div id="help-modal" class="hidden">
+    <div class="help-card">
+      <button type="button" id="help-close" class="auth-close" aria-label="Close">&times;</button>
+      <h2>📖 User manual</h2>
+
+      <p class="help-lede">
+        Book Recommender finds books for you by comparing them against the books you
+        already like. Everything below is optional — but the more you save and rate,
+        the better the recommendations get.
+      </p>
+
+      <div class="help-quickstart">
+        <strong>Quick start</strong>
+        <ol>
+          <li>Create an account with <em>Log in → Sign up</em> (top right).</li>
+          <li>Search for a few books you love and click <em>Save to Library</em>.</li>
+          <li>Open <em>My Library</em> and hit <em>Get Recommendations Based on My Library</em>.</li>
+        </ol>
+      </div>
+
+      <details class="help-section" open>
+        <summary>👤 Accounts</summary>
+        <ul>
+          <li><strong>Sign up / log in</strong> with the button in the top-right corner.
+            Usernames are 2–32 characters, passwords at least 6.</li>
+          <li>Your library follows your account, so it's the same on your phone and
+            your laptop. You stay signed in on a device until you log out.</li>
+          <li>You can search and use <em>Find Similar</em> without an account — but
+            saving, rating, sections and recommendations need one. If you click
+            <em>Save to Library</em> while signed out, the login box opens for you.</li>
+          <li>Once you're signed in, the app opens straight into <strong>My Library</strong>.</li>
+          <li>Forgot your username or password? Email us from the login box and we'll
+            sort it out.</li>
+        </ul>
+      </details>
+
+      <details class="help-section">
+        <summary>🔍 Searching for books</summary>
+        <ul>
+          <li>Pick a tab first — <strong>Title</strong>, <strong>Author</strong> or
+            <strong>Genre</strong> — then type and press Search. Genre accepts loose
+            terms like "cozy mystery" or "space opera".</li>
+          <li><strong>Published between</strong> narrows results to a year range. Leave
+            either box blank for an open-ended range, or both blank for all years.</li>
+          <li>Results are grouped by genre (each group is tinted by its genre) and
+            numbered by rank. Use the page buttons at the bottom for more results.</li>
+          <li>The <strong>% badge</strong> on a card is how strongly that book matched —
+            green is a strong match, amber medium, grey weak.</li>
+          <li><strong>Click any card</strong> to expand it: cover art, the full
+            description, action buttons, and links out to Google Books, Open Library,
+            and a "Find Online" web search.</li>
+        </ul>
+      </details>
+
+      <details class="help-section">
+        <summary>💾 Saving books to your library</summary>
+        <ul>
+          <li>Expand a book and click <strong>Save to Library</strong>. Saved books are
+            what your recommendations are built from.</li>
+          <li>Open the <strong>My Library</strong> tab (far right) to see everything you
+            saved. The switcher at the top flips between
+            <strong>Saved</strong>, <strong>Liked</strong> and <strong>Disliked</strong>.</li>
+          <li><strong>Remove</strong> on a saved book deletes it from your library and
+            from any sections it was in. In the Liked/Disliked views, Remove just clears
+            that rating.</li>
+        </ul>
+      </details>
+
+      <details class="help-section">
+        <summary>📖 Reading status</summary>
+        <ul>
+          <li>Every saved book has a <strong>Status…</strong> dropdown:
+            📥 Want to Read, 📖 Reading, or ✅ Read. A book has one status at a time;
+            pick <em>No status</em> to clear it.</li>
+          <li>The amber chips at the top of your library filter to each status, with a
+            live count.</li>
+          <li>With a status chip open, the recommend button becomes
+            <em>Get Recommendations from "Reading" Books</em> — a quick way to say
+            "more like what I'm reading right now".</li>
+        </ul>
+      </details>
+
+      <details class="help-section">
+        <summary>🗂️ Sections (your own shelves)</summary>
+        <ul>
+          <li>Click <strong>+ New Section</strong> in your library and name it
+            (e.g. "Sci-fi favorites"). A book can live in several sections at once.</li>
+          <li>In <strong>All Books</strong>, use the <strong>Add to section…</strong>
+            dropdown on a book. Sections it's already in show a ✓.</li>
+          <li>With a section open, that dropdown becomes <strong>Move to section…</strong>
+            (moves the book out of this one), and each card gains a
+            <strong>Remove from "…"</strong> button.</li>
+          <li><strong>Rename</strong> and <strong>Delete</strong> chips appear next to
+            the section bar while a section is open. Deleting a section never deletes
+            books — they stay in All Books.</li>
+        </ul>
+      </details>
+
+      <details class="help-section">
+        <summary>✨ Getting recommendations</summary>
+        <ul>
+          <li><strong>Whole library:</strong> in All Books, click
+            <em>Get Recommendations Based on My Library</em>.</li>
+          <li><strong>One section:</strong> open the section first — the button rescopes
+            to just those books.</li>
+          <li><strong>One reading status:</strong> open a status chip and use the same
+            button.</li>
+          <li><strong>A hand-picked set:</strong> tick the checkbox on any saved books; a
+            <em>Get Recommendations from N Selected Books</em> bar appears. Best when
+            your library spans moods and you want one of them.</li>
+          <li>Recommendations never include books already in your library or ones you've
+            disliked — even when you scope to a single section.</li>
+          <li><strong>← Back to My Library</strong> returns you to where you were.</li>
+          <li>Few or no results usually means the source books have thin metadata, or
+            your scope is very small. Save a few more books in that genre and retry.</li>
+        </ul>
+      </details>
+
+      <details class="help-section">
+        <summary>🔗 Find Similar</summary>
+        <ul>
+          <li>Every book card — in search results, your library, or a recommendation
+            list — has a <strong>Find Similar</strong> button that finds books like that
+            one specific title. No account needed.</li>
+          <li>It's a one-book lookup, so unlike recommendations it ignores the rest of
+            your library.</li>
+          <li>If a book has almost no description or genre data (common with webnovels
+            and self-published serials), you'll get an honest empty result rather than
+            unrelated books.</li>
+        </ul>
+      </details>
+
+      <details class="help-section">
+        <summary>👍 👎 Teaching it your taste</summary>
+        <ul>
+          <li><strong>👍</strong> tells it you want more books like this one;
+            <strong>👎</strong> suppresses that kind of book and keeps it out of your
+            results.</li>
+          <li>Click the same thumb again to undo the rating. Rated books show up under
+            the <em>Liked</em> and <em>Disliked</em> views in your library.</li>
+          <li>You can rate a book without saving it — handy for pruning
+            recommendations you don't want to see again.</li>
+        </ul>
+      </details>
+
+      <details class="help-section">
+        <summary>🎨 Display &amp; troubleshooting</summary>
+        <ul>
+          <li>The <strong>☀️ / 🌙</strong> button toggles light and dark mode; your
+            choice is remembered on that device.</li>
+          <li>Recommendations are computed live from Google Books and Open Library, so
+            the first run after changing your library takes a few seconds. Repeat runs
+            are cached and near-instant.</li>
+          <li>Book data (covers, descriptions, genres) comes from those two providers —
+            if a book looks sparse or mislabelled, that's usually the source data.</li>
+          <li>Something looks wrong? Email us from the link at the bottom of the page.</li>
+        </ul>
+      </details>
+    </div>
+  </div>
 
   <div id="auth-modal" class="hidden">
     <div class="auth-card">
@@ -95,6 +262,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=13"></script>
+  <script src="/static/app.js?v=14"></script>
 </body>
 </html>

@@ -32,6 +32,12 @@ const authSubmit    = document.getElementById("auth-submit");
 const authToggleText = document.getElementById("auth-toggle-text");
 const authToggleBtn  = document.getElementById("auth-toggle-btn");
 
+// Help / user manual elements
+const helpModal = document.getElementById("help-modal");
+const helpBtn   = document.getElementById("help-btn");
+const helpLink  = document.getElementById("help-link");
+const helpClose = document.getElementById("help-close");
+
 let activeCategory = "title";
 let lastQuery = "";
 let currentPage = 1;
@@ -131,9 +137,48 @@ function genreAccent(genre) {
   return null;
 }
 
+// ---- Help / user manual ----
+// The manual's content is static markup in index.html (one <details> per
+// feature); this only opens and closes it. Reopening starts back at the top.
+
+function openHelp() {
+  helpModal.classList.remove("hidden");
+  helpModal.scrollTop = 0;
+  const card = helpModal.querySelector(".help-card");
+  if (card) card.scrollTop = 0;
+}
+
+function closeHelp() {
+  helpModal.classList.add("hidden");
+}
+
+helpBtn.addEventListener("click", openHelp);
+helpLink.addEventListener("click", openHelp);
+helpClose.addEventListener("click", closeHelp);
+helpModal.addEventListener("click", (e) => {
+  if (e.target === helpModal) closeHelp();
+});
+
+// Esc closes whichever modal is open.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (!helpModal.classList.contains("hidden")) closeHelp();
+  else if (!authModal.classList.contains("hidden")) closeAuth();
+});
+
 // ---- Auth ----
 
 let startedAtLibrary = false;
+
+// Send the user into the My Library tab. Used on first load for an already
+// signed-in session and again right after a successful log in, so a returning
+// user never has to hunt for their books.
+function goToLibrary() {
+  const libTab = document.querySelector('.tab[data-category="library"]');
+  if (!libTab) return;
+  if (activeCategory === "library") loadLibrary(); // already there — just refresh
+  else libTab.click();
+}
 
 async function checkAuth() {
   try {
@@ -155,8 +200,7 @@ async function checkAuth() {
   // Anonymous visitors keep the search view — they have no library yet.
   if (currentUser && !startedAtLibrary) {
     startedAtLibrary = true;
-    const libTab = document.querySelector('.tab[data-category="library"]');
-    if (libTab && viewMode === "search" && !lastQuery) libTab.click();
+    if (viewMode === "search" && !lastQuery) goToLibrary();
   }
 }
 
@@ -234,7 +278,11 @@ authForm.addEventListener("submit", async (e) => {
     currentIsAdmin = !!data.is_admin;
     renderAuthBar();
     closeAuth();
-    if (activeCategory === "library") loadLibrary();
+    startedAtLibrary = true;
+    // Logging in drops you straight into your library. A brand-new account has
+    // nothing to show yet, so a sign-up stays on the search view unless the
+    // library tab was already the one open.
+    if (authMode === "login" || activeCategory === "library") goToLibrary();
   } catch (err) {
     authError.textContent = err.message;
     authError.classList.remove("hidden");
@@ -535,6 +583,18 @@ function renderLibrary(books, label) {
           ? "Books you give a 👍 will appear here and boost similar recommendations."
           : "Books you give a 👎 will appear here and suppress similar recommendations.";
     container.appendChild(hint);
+    // Signed-in users land here on load, so an empty library needs a way out —
+    // the search bar is hidden while the library tab is open.
+    if (libraryView === "saved" && !activeSection && !statusInfo) {
+      const searchBtn = document.createElement("button");
+      searchBtn.className = "recommend-btn library-login-btn";
+      searchBtn.textContent = "Search for books";
+      searchBtn.addEventListener("click", () => {
+        results.classList.add("hidden"); // don't leave the empty-library panel behind
+        document.querySelector('.tab[data-category="title"]')?.click();
+      });
+      container.appendChild(searchBtn);
+    }
     results.classList.remove("hidden");
     return;
   }
