@@ -1087,8 +1087,11 @@ main {
 
 /* ---- Light mode ----
    Dark is the default; body.light opts in (persisted in localStorage).
-   Curated overrides for the major surfaces rather than a full variable
-   refactor — extend here if a new component reads as too dark. */
+   Overrides rather than a variable refactor — so the rule when adding a
+   component is: anything that sets a dark background or a pale text colour
+   above needs a counterpart here, INCLUDING its :hover state. A `body.light X`
+   rule outranks a plain `X:hover`, so a hover that isn't overridden here just
+   stops working; one that only sets `background` leaves pale text on white. */
 body.light {
   background: #f4f4f7;
   color: #24262e;
@@ -1113,10 +1116,49 @@ body.light .tab {
   border-color: #c9ccd6;
 }
 
-body.light .tab.active {
+body.light .tab:hover {
+  background: #dfe1e9;
+  color: #24262e;
+}
+
+body.light .tab.library-tab {
+  border-color: #9fc79f;
+  color: #2f7d32;
+}
+
+body.light .tab.library-tab:hover { background: #dcecdc; color: #24632a; }
+
+body.light .tab.active,
+body.light .tab.active:hover {
   background: #5c6bc0;
   color: #fff;
   border-color: #5c6bc0;
+}
+
+body.light .tab.library-tab.active,
+body.light .tab.library-tab.active:hover {
+  background: #2f7d32;
+  border-color: #2f7d32;
+  color: #fff;
+}
+
+body.light #search-input::placeholder { color: #9498a5; }
+
+body.light #search-btn:disabled,
+body.light #auth-submit:disabled {
+  background: #d3d5de;
+  color: #8b8d97;
+}
+
+body.light #loading { color: #5a5d6b; }
+body.light .spinner { border-color: #d8dae2; border-top-color: #5c6bc0; }
+
+/* Alert surfaces: dark maroon panels become pale ones. */
+body.light #error,
+body.light .auth-error {
+  background: #fdecec;
+  border-color: #f0c2c2;
+  color: #b03030;
 }
 
 body.light .book-card,
@@ -1141,16 +1183,77 @@ body.light .tag {
   border-color: #c9ccd6;
 }
 
-body.light .save-btn,
-body.light .similar-btn,
-body.light .remove-btn,
-body.light .feedback-btn,
-body.light .section-select,
+/* Buttons. Each one needs its own text colour: the dark theme's light-grey
+   and pastel accents vanish on a white background, so every button that gets
+   a white surface here also gets a darkened accent and an explicit hover. */
 body.light .auth-btn,
-body.light .page-btn {
+body.light .section-select,
+body.light .page-btn,
+body.light .feedback-btn {
   background: #ffffff;
   border-color: #c9ccd6;
+  color: #24262e;
 }
+
+/* Header buttons (Help, Stats, Log in/out, theme) — the ones that read as
+   blank white-on-white before this rule. */
+body.light .auth-btn:hover {
+  background: #e8e9ef;
+  color: #24262e;
+}
+
+body.light #auth-bar { color: #5a5d6b; }
+
+body.light .section-select,
+body.light .page-btn,
+body.light .back-btn { color: #5a5d6b; }
+
+body.light .section-select:hover,
+body.light .page-btn:hover:not(:disabled),
+body.light .back-btn:hover {
+  background: #e8e9ef;
+  color: #24262e;
+}
+
+body.light .page-btn.active {
+  background: #5c6bc0;
+  border-color: #5c6bc0;
+  color: #fff;
+}
+
+body.light .feedback-btn:hover { background: #eef0f6; }
+body.light .like-btn.active { background: #e6f4e6; border-color: #9fc79f; }
+body.light .dislike-btn.active { background: #fbeaea; border-color: #e0aeae; }
+
+body.light .save-btn {
+  background: #ffffff;
+  border-color: #8fbf8f;
+  color: #2f7d32;
+}
+
+body.light .save-btn:hover { background: #2f7d32; color: #fff; }
+
+body.light .save-btn.saved {
+  background: #e6f4e6;
+  border-color: #bcd6bc;
+  color: #4a8a4a;
+}
+
+body.light .remove-btn {
+  background: #ffffff;
+  border-color: #e0aeae;
+  color: #c14040;
+}
+
+body.light .remove-btn:hover { background: #c14040; color: #fff; }
+
+body.light .similar-btn {
+  background: #ffffff;
+  border-color: #5c6bc0;
+  color: #3f51b5;
+}
+
+body.light .similar-btn:hover { background: #5c6bc0; color: #fff; }
 
 body.light .section-chip {
   background: #ffffff;
@@ -1205,9 +1308,82 @@ body.light .help-quickstart strong { color: #3f51b5; }
 
 body.light .stats-table th { color: #8b8d97; }
 body.light .stats-table td { color: #24262e; border-color: #d8dae2; }
+body.light .stats-value { color: #3f51b5; }
 body.light .book-rank { color: #d0d2da; }
 body.light .book-expand { color: #9aa; }
 body.light .site-footer { border-color: #d8dae2; }
+body.light .site-footer a,
+body.light .footer-link { color: #3f51b5; }
+
+/* Hairlines inside a white card — the dark theme's near-black dividers read
+   as hard black lines on white. */
+body.light .book-details { border-color: #e2e4ec; }
+body.light .genre-label { border-color: #e2e4ec; }
+
+/* Outbound link chips in an expanded card. */
+body.light .book-link {
+  background: #eef0f6;
+  border-color: #d8dae2;
+  color: #3f51b5;
+}
+
+body.light .book-link:hover { background: #e0e3ee; color: #2c3a9c; }
+
+/* Section chips: hover must come before the active/variant rules, which are
+   equally specific and have to win. */
+body.light .section-chip:hover {
+  background: #e8e9ef;
+  color: #24262e;
+}
+
+body.light .section-chip.section-new { color: #3f51b5; }
+
+body.light .section-chip.section-delete {
+  border-color: #e0aeae;
+  color: #c14040;
+}
+
+body.light .section-chip.section-delete:hover { background: #c14040; color: #fff; }
+
+body.light .section-chip.section-builtin:hover {
+  background: #f6ecd8;
+  color: #7a5a1c;
+}
+
+body.light .selected-bar { background: #2f7d32; border-color: #2f7d32; }
+body.light .selected-bar:hover { background: #3a8f3a; }
+
+/* Relevance badges — pale tint + dark text instead of dark tint + pale text. */
+body.light .relevance-badge.high {
+  background: #e6f4e6;
+  border-color: #bcd6bc;
+  color: #2f7d32;
+}
+
+body.light .relevance-badge.mid {
+  background: #fdf3dd;
+  border-color: #e2cfa0;
+  color: #8a6d3b;
+}
+
+body.light .relevance-badge.low {
+  background: #fbeaea;
+  border-color: #e0aeae;
+  color: #c14040;
+}
+
+/* Modals: lighter scrim, and the auth card's own text. */
+body.light #auth-modal,
+body.light #help-modal { background: rgba(36, 38, 46, 0.35); }
+
+body.light .auth-card h2 { color: #24262e; }
+body.light .auth-toggle,
+body.light .auth-forgot { color: #5a5d6b; }
+body.light .auth-toggle button,
+body.light .auth-forgot a { color: #3f51b5; }
+body.light .auth-toggle button:hover { color: #2c3a9c; }
+body.light .auth-close { color: #8b8d97; }
+body.light .auth-close:hover { color: #24262e; }
 
 /* Forgot account help link in the auth modal */
 .auth-forgot {
