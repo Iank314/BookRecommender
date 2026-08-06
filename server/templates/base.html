@@ -1,0 +1,147 @@
+{# Shared shell for the public "books like X" pages.
+
+   These are deliberately self-contained: the CSS is inline rather than a link
+   to the SPA's style.css, so a page is one request with no render-blocking
+   asset, and changes to the app's stylesheet can't silently restyle content
+   that search engines have already indexed. Theming uses CSS custom
+   properties (the SPA predates them and uses body.light overrides instead);
+   it honours the OS preference and the app's saved choice. #}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}Book Recommender{% endblock %}</title>
+  <meta name="description" content="{% block description %}{% endblock %}" />
+  {% if canonical %}
+  <link rel="canonical" href="{{ canonical }}" />
+  {% endif %}
+  <meta property="og:site_name" content="Book Recommender" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="{% block og_title %}{{ self.title() }}{% endblock %}" />
+  <meta property="og:description" content="{% block og_description %}{{ self.description() }}{% endblock %}" />
+  {% if canonical %}
+  <meta property="og:url" content="{{ canonical }}" />
+  {% endif %}
+  {% block og_extra %}{% endblock %}
+  <meta name="twitter:card" content="summary" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📚</text></svg>" />
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1c24;
+      --raised: #23252f;
+      --border: #2a2d35;
+      --text: #e1e2e6;
+      --strong: #ffffff;
+      --muted: #8b8d97;
+      --accent: #7986cb;
+      --accent-strong: #5c6bc0;
+      --good: #6fcf6f;
+    }
+    html.light {
+      --bg: #f4f4f7;
+      --surface: #ffffff;
+      --raised: #eef0f6;
+      --border: #d8dae2;
+      --text: #24262e;
+      --strong: #12141a;
+      --muted: #5a5d6b;
+      --accent: #3f51b5;
+      --accent-strong: #5c6bc0;
+      --good: #2f7d32;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      line-height: 1.6;
+    }
+    a { color: var(--accent); }
+    .wrap { max-width: 860px; margin: 0 auto; padding: 0 1.5rem 4rem; }
+    header.site {
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 2rem;
+    }
+    header.site .wrap {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding-top: 1.1rem;
+      padding-bottom: 1.1rem;
+    }
+    .brand {
+      font-weight: 700;
+      font-size: 1.05rem;
+      color: var(--strong);
+      text-decoration: none;
+    }
+    .brand span { color: var(--accent); }
+    .nav-cta {
+      font-size: 0.85rem;
+      font-weight: 600;
+      padding: 0.45rem 1rem;
+      border-radius: 6px;
+      background: var(--accent-strong);
+      color: #fff;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    h1 {
+      font-size: 1.9rem;
+      line-height: 1.25;
+      color: var(--strong);
+      margin-bottom: 0.6rem;
+    }
+    h2 { font-size: 1.15rem; color: var(--strong); margin-bottom: 0.8rem; }
+    .lede { color: var(--muted); margin-bottom: 2rem; }
+    footer.site {
+      border-top: 1px solid var(--border);
+      margin-top: 3rem;
+      padding-top: 1.2rem;
+      color: var(--muted);
+      font-size: 0.85rem;
+      text-align: center;
+    }
+    footer.site a { color: var(--accent); }
+    {% block styles %}{% endblock %}
+  </style>
+  {# Match the theme the visitor picked in the app. Runs before paint, so
+     there's no flash of the wrong background on a light-mode return visit. #}
+  <script>
+    (function () {
+      try {
+        var saved = localStorage.getItem("bookrec-theme");
+        var light = saved
+          ? saved === "light"
+          : window.matchMedia("(prefers-color-scheme: light)").matches;
+        if (light) document.documentElement.classList.add("light");
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/">📚 Ian's <span>Book Recommender</span></a>
+      <a class="nav-cta" href="/">Build your library →</a>
+    </div>
+  </header>
+
+  <main class="wrap">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site">
+    <div class="wrap">
+      <p>
+        <a href="/">Search books</a> ·
+        <a href="/books-like">All recommendation lists</a> ·
+        <a href="mailto:kaufmanian49@gmail.com?subject=Book%20Recommender">Contact</a>
+      </p>
+    </div>
+  </footer>
+</body>
+</html>

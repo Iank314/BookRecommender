@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+
+{# The money page. Everything above the results is real content about the
+   source book — a page that opens straight into a bare list reads as a
+   scraped listicle to both readers and search engines. #}
+
+{% set author_line = source.authors | join(", ") if source.authors else "" %}
+
+{% block title %}Books Like {{ source_title }} — {{ results | length }} Recommendations{% endblock %}
+
+{% block description %}Looking for books like {{ source_title }}{% if author_line %} by {{ author_line }}{% endif %}? Here are {{ results | length }} similar books, ranked by shared genres and themes, with a reason for every match.{% endblock %}
+
+{% block og_extra %}
+  {% if source.metadata and source.metadata.thumbnail %}
+  <meta property="og:image" content="{{ source.metadata.thumbnail | replace('http://', 'https://') }}" />
+  {% endif %}
+{% endblock %}
+
+{% block styles %}
+    .source {
+      display: flex;
+      gap: 1.2rem;
+      padding: 1.2rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      margin-bottom: 2rem;
+    }
+    .source img { width: 96px; border-radius: 6px; flex-shrink: 0; }
+    .source h2 { margin-bottom: 0.2rem; }
+    .source .byline { color: var(--muted); font-size: 0.9rem; margin-bottom: 0.6rem; }
+    .source p.blurb { font-size: 0.92rem; color: var(--text); }
+    ol.results { list-style: none; counter-reset: rank; }
+    li.result {
+      counter-increment: rank;
+      display: flex;
+      gap: 1rem;
+      padding: 1.1rem 1.2rem;
+      margin-bottom: 0.7rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    li.result::before {
+      content: counter(rank);
+      font-size: 1.3rem;
+      font-weight: 700;
+      color: var(--border);
+      min-width: 1.8rem;
+    }
+    li.result img { width: 72px; border-radius: 5px; flex-shrink: 0; align-self: flex-start; }
+    .result-body { flex: 1; min-width: 0; }
+    .result-title { font-size: 1.05rem; font-weight: 600; color: var(--strong); }
+    .result-title a { color: var(--strong); text-decoration: none; }
+    .result-title a:hover { color: var(--accent); }
+    .byline { color: var(--muted); font-size: 0.88rem; }
+    .reason {
+      margin: 0.45rem 0;
+      padding: 0.4rem 0.7rem;
+      background: var(--raised);
+      border-left: 3px solid var(--accent-strong);
+      border-radius: 0 5px 5px 0;
+      font-size: 0.85rem;
+      color: var(--text);
+    }
+    .blurb { font-size: 0.88rem; color: var(--muted); }
+    .match {
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--good);
+      white-space: nowrap;
+    }
+    .cta {
+      margin-top: 2.5rem;
+      padding: 1.5rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      text-align: center;
+    }
+    .cta h2 { margin-bottom: 0.5rem; }
+    .cta p { color: var(--muted); font-size: 0.92rem; margin-bottom: 1rem; }
+    .cta a {
+      display: inline-block;
+      padding: 0.7rem 1.6rem;
+      border-radius: 8px;
+      background: var(--accent-strong);
+      color: #fff;
+      font-weight: 600;
+      text-decoration: none;
+    }
+    @media (max-width: 560px) {
+      .source { flex-direction: column; }
+      li.result::before { display: none; }
+    }
+{% endblock %}
+
+{% block content %}
+  <h1>Books Like {{ source_title }}</h1>
+  <p class="lede">
+    {{ results | length }} recommendations for readers who liked
+    <strong>{{ source_title }}</strong>{% if author_line %} by {{ author_line }}{% endif %},
+    ranked by how much they share in genre and subject matter — with the reason
+    for every match spelled out.
+  </p>
+
+  <div class="source">
+    {% if source.metadata and source.metadata.thumbnail %}
+    <img src="{{ source.metadata.thumbnail | replace('http://', 'https://') }}"
+         alt="Cover of {{ source_title }}" loading="lazy" width="96" />
+    {% endif %}
+    <div>
+      <h2>{{ source_title }}</h2>
+      {% if author_line %}<div class="byline">by {{ author_line }}</div>{% endif %}
+      {% if source.description %}
+      <p class="blurb">{{ source.description | truncate(420) }}</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <h2>What to read next</h2>
+  <ol class="results">
+    {% for item in results %}
+    <li class="result">
+      {% if item.metadata and item.metadata.thumbnail %}
+      <img src="{{ item.metadata.thumbnail | replace('http://', 'https://') }}"
+           alt="Cover of {{ item.title }}" loading="lazy" width="72" />
+      {% endif %}
+      <div class="result-body">
+        <div class="result-title">
+          {# Only link onward when that book has its own page — the route
+             resolves this, so a link here is never a 404. #}
+          {% if item.slug %}
+          <a href="/books-like/{{ item.slug }}">{{ item.title }}</a>
+          {% else %}
+          {{ item.title }}
+          {% endif %}
+        </div>
+        <div class="byline">
+          {{ item.authors | join(", ") if item.authors else "Unknown author" }}
+          {% if item.relevance %}
+          · <span class="match">{{ item.relevance | round | int }}% match</span>
+          {% endif %}
+        </div>
+        {% if item.reason %}<p class="reason">{{ item.reason }}</p>{% endif %}
+        {% if item.description %}
+        <p class="blurb">{{ item.description | truncate(240) }}</p>
+        {% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ol>
+
+  <div class="cta">
+    <h2>Get recommendations from your whole shelf</h2>
+    <p>
+      This list is built from one book. Save the ones you like to a free library
+      and the recommender scores against everything you've read — or just one
+      shelf of it.
+    </p>
+    <a href="/">Start your library →</a>
+  </div>
+
+  {# ItemList markup so Google can render this as a rich result rather than a
+     plain blue link. Built in the route — structured data should mirror what
+     was rendered, so it comes from the same dict the list above iterates. #}
+  <script type="application/ld+json">{{ jsonld | tojson }}</script>
+{% endblock %}

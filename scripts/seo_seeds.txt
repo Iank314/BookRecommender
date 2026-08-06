@@ -1,0 +1,249 @@
+# Seed titles for the public "books like X" pages.
+#
+# Format: `Title | Author`. Everything after a # is a comment; blank lines and
+# duplicate titles are dropped. Order doesn't matter.
+#
+# THE AUTHOR IS NOT OPTIONAL IN PRACTICE. Titles are not unique: a bare
+# "The Fifth Season" resolves to a Vermont detective novel rather than
+# Jemisin's, and a page built on the wrong book is worse than no page at all.
+# When an author is given, records that don't match it are rejected outright,
+# so a seed that can't be resolved is skipped instead of guessed at.
+# Surname matching is what's used, so initials and formatting don't matter.
+#
+# What belongs here: books people actually search "books like ___" for, in the
+# genres this recommender scores well. That's not an accident of taste — the
+# same popular titles are the ones with rich Google Books / Open Library
+# metadata, which is exactly what the scorer needs. Obscure and self-published
+# serials (the known data wall in CLAUDE.md) will fail the publish gate and
+# waste a lookup, so leave them out.
+#
+# Roughly half of these clear the publish gate on a given run; that's the gate
+# working, not a bug. Adding lines here is the main growth lever — every new
+# one is a potential search landing page. Re-run the generator after editing.
+
+# ---- Epic / high fantasy ----
+The Name of the Wind | Patrick Rothfuss
+Mistborn | Brandon Sanderson
+The Way of Kings | Brandon Sanderson
+The Eye of the World | Robert Jordan
+A Game of Thrones | George R. R. Martin
+The Lies of Locke Lamora | Scott Lynch
+The Blade Itself | Joe Abercrombie
+The Fifth Season | N. K. Jemisin
+Gardens of the Moon | Steven Erikson
+The Black Prism | Brent Weeks
+The Hobbit | J. R. R. Tolkien
+The Fellowship of the Ring | J. R. R. Tolkien
+Assassin's Apprentice | Robin Hobb
+The Priory of the Orange Tree | Samantha Shannon
+The Poppy War | R. F. Kuang
+Babel | R. F. Kuang
+Jade City | Fonda Lee
+The Rage of Dragons | Evan Winter
+Elantris | Brandon Sanderson
+Warbreaker | Brandon Sanderson
+The Final Empire | Brandon Sanderson
+The Bear and the Nightingale | Katherine Arden
+Piranesi | Susanna Clarke
+Jonathan Strange and Mr Norrell | Susanna Clarke
+The Night Circus | Erin Morgenstern
+Uprooted | Naomi Novik
+Spinning Silver | Naomi Novik
+The Once and Future King | T. H. White
+A Wizard of Earthsea | Ursula K. Le Guin
+The Sword of Shannara | Terry Brooks
+Pawn of Prophecy | David Eddings
+Wizard's First Rule | Terry Goodkind
+The Dragonbone Chair | Tad Williams
+The Golden Compass | Philip Pullman
+Good Omens | Terry Pratchett
+The Colour of Magic | Terry Pratchett
+American Gods | Neil Gaiman
+Neverwhere | Neil Gaiman
+The Ocean at the End of the Lane | Neil Gaiman
+The Last Wish | Andrzej Sapkowski
+Nevernight | Jay Kristoff
+The Traitor Baru Cormorant | Seth Dickinson
+Senlin Ascends | Josiah Bancroft
+
+# ---- Science fiction ----
+Dune | Frank Herbert
+Project Hail Mary | Andy Weir
+The Martian | Andy Weir
+The Three-Body Problem | Cixin Liu
+Neuromancer | William Gibson
+Snow Crash | Neal Stephenson
+Cryptonomicon | Neal Stephenson
+Hyperion | Dan Simmons
+Ender's Game | Orson Scott Card
+Foundation | Isaac Asimov
+I Robot | Isaac Asimov
+The Left Hand of Darkness | Ursula K. Le Guin
+The Dispossessed | Ursula K. Le Guin
+A Fire Upon the Deep | Vernor Vinge
+Leviathan Wakes | James S. A. Corey
+Children of Time | Adrian Tchaikovsky
+Ready Player One | Ernest Cline
+Old Man's War | John Scalzi
+Altered Carbon | Richard K. Morgan
+Ancillary Justice | Ann Leckie
+Do Androids Dream of Electric Sheep | Philip K. Dick
+Ubik | Philip K. Dick
+Rendezvous with Rama | Arthur C. Clarke
+Childhood's End | Arthur C. Clarke
+Blindsight | Peter Watts
+The Forever War | Joe Haldeman
+Starship Troopers | Robert A. Heinlein
+Stranger in a Strange Land | Robert A. Heinlein
+Klara and the Sun | Kazuo Ishiguro
+Never Let Me Go | Kazuo Ishiguro
+Recursion | Blake Crouch
+Dark Matter | Blake Crouch
+Station Eleven | Emily St. John Mandel
+The Road | Cormac McCarthy
+Annihilation | Jeff VanderMeer
+Solaris | Stanislaw Lem
+A Canticle for Leibowitz | Walter M. Miller
+The Stars My Destination | Alfred Bester
+Red Mars | Kim Stanley Robinson
+A Memory Called Empire | Arkady Martine
+The Long Way to a Small Angry Planet | Becky Chambers
+This Is How You Lose the Time War | Amal El-Mohtar
+
+# ---- LitRPG / progression / cultivation ----
+Dungeon Crawler Carl | Matt Dinniman
+He Who Fights with Monsters | Shirtaloon
+Unsouled | Will Wight
+The Wandering Inn | Pirateaba
+Mother of Learning | Domagoj Kurmaic
+Defiance of the Fall | JF Brink
+Awaken Online | Travis Bagwell
+Beware of Chicken | Casualfarmer
+Sufficiently Advanced Magic | Andrew Rowe
+Ascendance of a Bookworm | Miya Kazuki
+Super Powereds | Drew Hayes
+
+# ---- Mystery / thriller / crime ----
+Gone Girl | Gillian Flynn
+Sharp Objects | Gillian Flynn
+The Girl with the Dragon Tattoo | Stieg Larsson
+The Silent Patient | Alex Michaelides
+Big Little Lies | Liane Moriarty
+And Then There Were None | Agatha Christie
+Murder on the Orient Express | Agatha Christie
+The Thursday Murder Club | Richard Osman
+The Da Vinci Code | Dan Brown
+Angels and Demons | Dan Brown
+In the Woods | Tana French
+The Guest List | Lucy Foley
+The Cuckoo's Calling | Robert Galbraith
+Mystic River | Dennis Lehane
+Shutter Island | Dennis Lehane
+The Talented Mr. Ripley | Patricia Highsmith
+The Big Sleep | Raymond Chandler
+Rebecca | Daphne du Maurier
+The Secret History | Donna Tartt
+The Goldfinch | Donna Tartt
+The Woman in the Window | A. J. Finn
+I Am Pilgrim | Terry Hayes
+The Girl on the Train | Paula Hawkins
+Before I Go to Sleep | S. J. Watson
+
+# ---- Romance / romantasy ----
+A Court of Thorns and Roses | Sarah J. Maas
+Throne of Glass | Sarah J. Maas
+Fourth Wing | Rebecca Yarros
+The Love Hypothesis | Ali Hazelwood
+Beach Read | Emily Henry
+Book Lovers | Emily Henry
+People We Meet on Vacation | Emily Henry
+It Ends with Us | Colleen Hoover
+Red White and Royal Blue | Casey McQuiston
+The Hating Game | Sally Thorne
+The Seven Husbands of Evelyn Hugo | Taylor Jenkins Reid
+Daisy Jones and the Six | Taylor Jenkins Reid
+Outlander | Diana Gabaldon
+The Duke and I | Julia Quinn
+From Blood and Ash | Jennifer L. Armentrout
+Shadow and Bone | Leigh Bardugo
+Six of Crows | Leigh Bardugo
+Caraval | Stephanie Garber
+The Cruel Prince | Holly Black
+
+# ---- Horror ----
+The Shining | Stephen King
+Pet Sematary | Stephen King
+Salem's Lot | Stephen King
+House of Leaves | Mark Z. Danielewski
+Mexican Gothic | Silvia Moreno-Garcia
+The Haunting of Hill House | Shirley Jackson
+We Have Always Lived in the Castle | Shirley Jackson
+Bird Box | Josh Malerman
+The Exorcist | William Peter Blatty
+The Only Good Indians | Stephen Graham Jones
+Something Wicked This Way Comes | Ray Bradbury
+Dracula | Bram Stoker
+Frankenstein | Mary Shelley
+The Troop | Nick Cutter
+
+# ---- Young adult ----
+The Hunger Games | Suzanne Collins
+The Lightning Thief | Rick Riordan
+Harry Potter and the Sorcerer's Stone | J. K. Rowling
+Divergent | Veronica Roth
+The Maze Runner | James Dashner
+The Fault in Our Stars | John Green
+Looking for Alaska | John Green
+Eragon | Christopher Paolini
+The Giver | Lois Lowry
+Legend | Marie Lu
+An Ember in the Ashes | Sabaa Tahir
+Children of Blood and Bone | Tomi Adeyemi
+Cinder | Marissa Meyer
+The Book Thief | Markus Zusak
+
+# ---- Literary / contemporary ----
+Where the Crawdads Sing | Delia Owens
+A Little Life | Hanya Yanagihara
+Normal People | Sally Rooney
+The Kite Runner | Khaled Hosseini
+A Thousand Splendid Suns | Khaled Hosseini
+Life of Pi | Yann Martel
+Cloud Atlas | David Mitchell
+The Midnight Library | Matt Haig
+A Man Called Ove | Fredrik Backman
+Pachinko | Min Jin Lee
+The Song of Achilles | Madeline Miller
+Circe | Madeline Miller
+Lessons in Chemistry | Bonnie Garmus
+Tomorrow and Tomorrow and Tomorrow | Gabrielle Zevin
+The Overstory | Richard Powers
+Beloved | Toni Morrison
+One Hundred Years of Solitude | Gabriel Garcia Marquez
+Slaughterhouse-Five | Kurt Vonnegut
+Cat's Cradle | Kurt Vonnegut
+Catch-22 | Joseph Heller
+1984 | George Orwell
+Animal Farm | George Orwell
+Brave New World | Aldous Huxley
+The Handmaid's Tale | Margaret Atwood
+Fahrenheit 451 | Ray Bradbury
+The Bell Jar | Sylvia Plath
+
+# ---- Nonfiction ----
+Sapiens | Yuval Noah Harari
+Atomic Habits | James Clear
+Educated | Tara Westover
+Thinking Fast and Slow | Daniel Kahneman
+Outliers | Malcolm Gladwell
+The Tipping Point | Malcolm Gladwell
+The Body Keeps the Score | Bessel van der Kolk
+Bad Blood | John Carreyrou
+Into Thin Air | Jon Krakauer
+The Immortal Life of Henrietta Lacks | Rebecca Skloot
+Born a Crime | Trevor Noah
+Quiet | Susan Cain
+Deep Work | Cal Newport
+Man's Search for Meaning | Viktor Frankl
+The Power of Habit | Charles Duhigg
+Guns Germs and Steel | Jared Diamond

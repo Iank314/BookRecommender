@@ -23,6 +23,7 @@ import sys
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+from scripts._lookup import find_source as _find_source
 from server.app import (
     SimilarRequest,
     _book_popularity,
@@ -32,39 +33,8 @@ from server.app import (
     _genre_score,
     _idf_weighted_f1,
     _score_similar_candidates,
-    _score_title,
     _text_tokens,
 )
-from server.fetcher.fetcher import GOOGLE_ENDPOINT, OPENLIB_ENDPOINT, Fetcher
-from server.models.book import Books
-
-
-def _find_source(title: str) -> Books | None:
-    """Best title match across both providers, preferring richer records —
-    a source with tags and a real description gives the scorer more to work
-    with, mirroring what a user clicking "Find Similar" on a result sees."""
-    best, best_score = None, 0.0
-    query_lower = title.lower().strip()
-    for endpoint in (OPENLIB_ENDPOINT, GOOGLE_ENDPOINT):
-        try:
-            if endpoint == OPENLIB_ENDPOINT:
-                books, _ = Fetcher(source=endpoint).fetch_page(
-                    title, batch_size=40, category="title")
-            else:
-                books, _ = Fetcher(source=endpoint).fetch_google_page(
-                    title, max_results=20, category="title")
-        except Exception as exc:
-            print(f"  (provider {endpoint} failed: {exc})")
-            continue
-        for b in books:
-            score = _score_title(b, query_lower)
-            if score <= 0:
-                continue
-            # Tiebreak toward records with tags + a real description.
-            score += min(len(b.tags), 5) + min(len(b.description) / 500.0, 2.0)
-            if score > best_score:
-                best, best_score = b, score
-    return best
 
 
 def main() -> None:

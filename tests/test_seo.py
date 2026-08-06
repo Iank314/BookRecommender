@@ -13,6 +13,9 @@ import pytest
 
 from server.seo import (
     MIN_PAGE_RESULTS,
+    genre_echo,
+    has_core_genre,
+    is_excluded_edition,
     page_url,
     robots_txt,
     should_publish,
@@ -73,21 +76,77 @@ def _results(n, top=90.0):
 
 
 def test_gate_accepts_a_strong_page():
-    assert should_publish(_results(MIN_PAGE_RESULTS)) is True
+    ok, why = should_publish(_results(MIN_PAGE_RESULTS))
+    assert ok is True and why == ""
 
 
 def test_gate_rejects_too_few_results():
-    assert should_publish(_results(MIN_PAGE_RESULTS - 1)) is False
+    ok, why = should_publish(_results(MIN_PAGE_RESULTS - 1))
+    assert ok is False and "results" in why
 
 
 def test_gate_rejects_a_full_list_of_weak_matches():
     # The failure mode this exists for: a sparse-metadata book returns a full
     # list of near-ties, none of which is actually a match.
-    assert should_publish(_results(20, top=8.0)) is False
+    ok, why = should_publish(_results(20, top=8.0))
+    assert ok is False and "top match" in why
 
 
 def test_gate_tolerates_missing_relevance():
-    assert should_publish([{"title": "B"} for _ in range(20)]) is False
+    assert should_publish([{"title": "B"} for _ in range(20)])[0] is False
+
+
+# ------------------------------------------------------ genre bars
+
+def test_source_with_only_subject_facets_has_no_core_genre():
+    # Ender's Game resolved to ['end of the world', 'military education',
+    # 'prize:nebula'] and recommended Army training manuals.
+    assert has_core_genre({"end of the world", "military education"}) is False
+    assert has_core_genre({"fantasy", "assassins"}) is True
+
+
+def test_bare_fiction_does_not_count_as_a_genre():
+    # Shutter Island's only genre-ish atom was "fiction"; its page was US
+    # Marshals paperwork. "fiction" lives in the generic bucket for a reason.
+    assert has_core_genre({"fiction"}) is False
+    assert has_core_genre({"general"}) is False
+
+
+def test_study_guide_editions_are_excluded():
+    # Frankenstein resolved to a study guide — same author, so the author hint
+    # can't catch it — and recommended Kaplan SAT prep.
+    assert is_excluded_edition({"examinations", "study guides"}) is True
+    assert is_excluded_edition({"fantasy"}) is False
+
+
+def test_genre_echo_measures_shared_core_genres_only():
+    source = {"fantasy", "brothers and sisters"}
+    # Results share the facet, not the genre — An Ember in the Ashes' failure.
+    assert genre_echo(source, [{"brothers and sisters"}] * 4) == 0.0
+    assert genre_echo(source, [{"fantasy"}] * 4) == 1.0
+    assert genre_echo(source, [{"fantasy"}, {"brothers and sisters"}]) == 0.5
+
+
+def test_genre_echo_is_zero_when_the_source_has_no_genre():
+    assert genre_echo({"military education"}, [{"military education"}] * 4) == 0.0
+
+
+def test_gate_rejects_a_page_matched_on_a_facet():
+    ok, why = should_publish(
+        _results(20), {"fantasy", "brothers and sisters"},
+        [{"brothers and sisters"}] * 20,
+    )
+    assert ok is False and "share a genre" in why
+
+
+def test_gate_accepts_a_page_matched_on_a_real_genre():
+    ok, why = should_publish(_results(20), {"fantasy"}, [{"fantasy"}] * 20)
+    assert ok is True and why == ""
+
+
+def test_gate_skips_genre_checks_when_atoms_are_absent():
+    # The length/score bars stay usable on their own.
+    assert should_publish(_results(20))[0] is True
 
 
 # ----------------------------------------------------------------- storage

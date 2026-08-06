@@ -31,8 +31,15 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from scripts._lookup import find_source
-from server.app import SimilarRequest, similar_page_data
-from server.seo import MIN_PAGE_RESULTS, MIN_TOP_RELEVANCE, should_publish, slugify
+from server.app import SimilarRequest, _genre_atoms, similar_page_data
+from server.seo import (
+    MIN_PAGE_RESULTS,
+    MIN_TOP_RELEVANCE,
+    has_core_genre,
+    is_excluded_edition,
+    should_publish,
+    slugify,
+)
 from server.storage.seo_db import SeoPageStore
 
 SEEDS_PATH = Path(__file__).resolve().parent / "seo_seeds.txt"
@@ -88,6 +95,21 @@ def generate_one(
     if not slug:
         return "", None, [], f"title produced an empty slug ({source.title!r})"
 
+    # Check the source record *before* scoring: it's the expensive step, and a
+    # record with no genre or the wrong edition can't produce a good page no
+    # matter how well it scores.
+    specific, generic = _genre_atoms(source.tags or [])
+    atoms = set(specific) | set(generic)
+    if is_excluded_edition(atoms):
+        return slug, None, [], (
+            f"resolved to a study-guide/criticism edition ({sorted(atoms)[:3]})"
+        )
+    if not has_core_genre(set(specific)):
+        return slug, None, [], (
+            f"source record carries no genre, only subject facets "
+            f"({sorted(atoms)[:4]})"
+        )
+
     req = SimilarRequest(
         id=source.id, title=source.title, authors=source.authors,
         description=source.description, tags=source.tags, top_n=top_n,
@@ -97,6 +119,55 @@ def generate_one(
     except Exception as exc:
         return slug, None, [], f"scoring failed ({exc})"
     return slug, source_out, results, ""
+
+
+def page_atoms(source: dict, results: list[dict]) -> tuple[set[str], list[set[str]]]:
+    """(source atoms, per-result atoms) for the genre bars in should_publish.
+
+    Works off the same dicts that get stored, so --prune can re-apply the gate
+    to pages already in the database without re-fetching anything.
+    """
+    def atoms(tags: list[str]) -> set[str]:
+        specific, generic = _genre_atoms(tags or [])
+        return set(specific) | set(generic)
+
+    return atoms(source.get("tags", [])), [atoms(r.get("tags", [])) for r in results]
+
+
+def prune(store: SeoPageStore, min_results: int, dry_run: bool) -> None:
+    """Re-apply the current gate to already-published pages, unpublishing fails.
+
+    The stored payload holds every tag the gate looks at, so tightening the
+    gate doesn't mean re-running a multi-hour fetch — worth having, because the
+    gate has needed tightening every time a batch got reviewed.
+    """
+    removed = 0
+    for meta in store.list_pages():
+        page = store.get(meta["slug"])
+        source, results = page["source"], page["results"]
+
+        specific, generic = _genre_atoms(source.get("tags", []))
+        atoms = set(specific) | set(generic)
+        if is_excluded_edition(atoms):
+            why = f"study-guide/criticism edition ({sorted(atoms)[:3]})"
+        elif not has_core_genre(set(specific)):
+            why = f"source has no genre, only facets ({sorted(atoms)[:4]})"
+        else:
+            ok, reason = should_publish(
+                results, *page_atoms(source, results), min_results=min_results,
+            )
+            if ok:
+                continue
+            why = reason
+
+        print(f"  {'would remove' if dry_run else 'removed'} /{meta['slug']}: {why}")
+        if not dry_run:
+            store.delete(meta["slug"])
+        removed += 1
+
+    verb = "Would remove" if dry_run else "Removed"
+    remaining = store.count() - removed if dry_run else store.count()
+    print(f"\n{verb} {removed} page(s). Pages that pass the gate: {remaining}")
 
 
 def main() -> None:
@@ -111,9 +182,15 @@ def main() -> None:
                     help="Recommendations per page (default 20)")
     ap.add_argument("--min-results", type=int, default=MIN_PAGE_RESULTS,
                     help=f"Publish gate: minimum results (default {MIN_PAGE_RESULTS})")
+    ap.add_argument("--prune", action="store_true",
+                    help="Re-apply the gate to existing pages and unpublish "
+                         "failures (no fetching). Combine with --dry-run.")
     args = ap.parse_args()
 
     store = SeoPageStore()
+    if args.prune:
+        prune(store, args.min_results, args.dry_run)
+        return
     if args.only:
         title, _, author = args.only.partition("|")
         seeds = [(title.strip(), author.strip() or None)]
@@ -152,9 +229,11 @@ def main() -> None:
             continue
 
         top = max((r.get("relevance") or 0) for r in results) if results else 0
-        if not should_publish(results, min_results=args.min_results):
-            print(f"{prefix}: below gate ({len(results)} results, "
-                  f"top {top:.0f}%) — not published")
+        ok, why = should_publish(
+            results, *page_atoms(source, results), min_results=args.min_results,
+        )
+        if not ok:
+            print(f"{prefix}: below gate — {why}")
             skipped += 1
             continue
 

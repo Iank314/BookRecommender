@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+
+{# Served with a real 404 status: a "soft 404" (200 + "not found" text) makes
+   search engines index the placeholder and keep recrawling dead slugs. #}
+
+{% block title %}Page not found — Book Recommender{% endblock %}
+{% block description %}That recommendation list doesn't exist.{% endblock %}
+
+{% block styles %}
+    .actions { margin-top: 1.5rem; display: flex; gap: 0.6rem; flex-wrap: wrap; }
+    .actions a {
+      padding: 0.6rem 1.2rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text);
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 0.9rem;
+    }
+    .actions a:hover { border-color: var(--accent); }
+{% endblock %}
+
+{% block content %}
+  <h1>No list for that book</h1>
+  <p class="lede">
+    We haven't published a recommendation list for that title — but you can
+    search for it and get similar books straight away.
+  </p>
+  <div class="actions">
+    <a href="/">Search for a book</a>
+    <a href="/books-like">Browse all lists</a>
+  </div>
+{% endblock %}

@@ -14,8 +14,9 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import Body, Cookie, Depends, FastAPI, HTTPException, Query, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, constr
 
@@ -33,7 +34,15 @@ from server.fetcher.fetcher import (
 from server.models.book import Books
 from server.recommender.recommendation_engine import RecommendationEngine
 from server.recommender.recommender import Recommender
+from server.seo import (
+    DEFAULT_BASE_URL,
+    page_url,
+    robots_txt,
+    sitemap_xml,
+    slugify,
+)
 from server.storage.activity_db import ActivityStore
+from server.storage.seo_db import SeoPageStore
 from server.storage.feedback_db import FeedbackKind, FeedbackStore
 from server.storage.library_db import LibraryStore, SectionNameTakenError
 from server.storage.users_db import UserStore, UsernameTakenError
@@ -650,6 +659,80 @@ def _gather_similar_candidates(
     return source_book, src_lang, all_books
 
 
+def _cap_by_author(
+    ranked: list[tuple[Books, float]], cap: int, top_n: int
+) -> list[tuple[Books, float]]:
+    """Keep at most `cap` books per author. Applied before the top-N slice,
+    otherwise capping would just shorten the list instead of promoting others.
+
+    Unlike the diversity step in /library/recommend, capped-out books are NOT
+    backfilled to reach top_n. Backfilling defeats the point here: when the
+    pool is thin — Mistborn's was 12 Sanderson titles deep — every skipped book
+    comes straight back and the page is a bibliography again. A shorter, varied
+    list is the better page; the publish gate enforces a floor on the length.
+    """
+    author_counts: dict[str, int] = defaultdict(int)
+    chosen: list[tuple[Books, float]] = []
+    for cand, score in ranked:
+        author = _norm_title(cand.authors[0]) if cand.authors else ""
+        if author and author_counts[author] >= cap:
+            continue
+        chosen.append((cand, score))
+        if author:
+            author_counts[author] += 1
+        if len(chosen) >= top_n:
+            break
+    return chosen
+
+
+def _similar_core(
+    req: SimilarRequest,
+    author_cap: int | None = None,
+    min_score: float = MIN_SIMILAR_SCORE,
+) -> tuple[Books | None, list[tuple[Books, float]], list[Books]]:
+    """The /similar pipeline up to the final ranked list.
+
+    Split out so the live endpoint and the offline SEO page generator run the
+    *same* scoring path — a public "books like X" page that disagreed with what
+    the app shows for the same book would be a bug in both directions. Returns
+    the (possibly enrichment-updated) source, the ranked top-N, and the raw
+    candidate pool the caller needs for IDF if it wants match explanations.
+
+    `author_cap` limits how many books one author can take. The app leaves it
+    off deliberately: someone who clicks "Find Similar" on Mistborn often does
+    want more Sanderson. A public "books like X" page is the opposite — a list
+    that's two-thirds one author reads as a bibliography, not a recommendation.
+
+    `min_score` raises the relevance floor. The app's floor is permissive
+    because a weak extra result costs a user one glance; on a public page the
+    worst entry is what a first-time visitor judges the whole site by.
+    """
+    source_book, src_lang, candidates = _gather_similar_candidates(req)
+    if not candidates:
+        return None, [], []
+
+    scored = _score_similar_candidates(source_book, candidates)
+    # Floor: a 2% match is a single shared token, not a recommendation.
+    # Better an honest "no similar books found" than one wrong book.
+    scored = [(c, s) for c, s in scored if s >= min_score]
+    if not scored:
+        return source_book, [], candidates
+
+    # --- 5) Collapse each series to its earliest-volume entry ---
+    collapsed = _collapse_series_picks([(cand, score, None) for cand, score in scored])
+    ranked = [(book, score) for book, score, _ in collapsed]
+    top = (
+        _cap_by_author(ranked, author_cap, req.top_n)
+        if author_cap else ranked[: req.top_n]
+    )
+
+    # --- 6) Swap any later-volume entry for its book 1 ---
+    src_titles = {_norm_title(req.title)}
+    src_langs = {src_lang} if src_lang and src_lang != "non-latin" else set()
+    top = _swap_to_entry_points(top, src_langs, src_titles)
+    return source_book, top, candidates
+
+
 @app.post("/similar", response_model=list[BookOut], summary="Find similar books")
 def find_similar(
     req: SimilarRequest,
@@ -666,26 +749,7 @@ def find_similar(
     if cached is not None:
         return cached
 
-    source_book, src_lang, candidates = _gather_similar_candidates(req)
-    if not candidates:
-        return []
-
-    scored = _score_similar_candidates(source_book, candidates)
-    # Floor: a 2% match is a single shared token, not a recommendation.
-    # Better an honest "no similar books found" than one wrong book.
-    scored = [(c, s) for c, s in scored if s >= MIN_SIMILAR_SCORE]
-    if not scored:
-        return []
-
-    # --- 5) Collapse each series to its earliest-volume entry ---
-    collapsed = _collapse_series_picks([(cand, score, None) for cand, score in scored])
-    top = [(book, score) for book, score, _ in collapsed][: req.top_n]
-
-    # --- 6) Swap any later-volume entry for its book 1 ---
-    src_titles = {_norm_title(req.title)}
-    src_langs = {src_lang} if src_lang and src_lang != "non-latin" else set()
-    top = _swap_to_entry_points(top, src_langs, src_titles)
-
+    _, top, _ = _similar_core(req)
     result = [_to_out(book, relevance=round(sim * 100, 1)) for book, sim in top]
     # Empty results aren't cached — the earlier exits are usually transient
     # provider failures, and an hour of cached emptiness would mask recovery.
@@ -775,6 +839,188 @@ def _compute_token_idf(books: list[Books], token_fn=_text_tokens) -> dict[str, f
             df[tok] = df.get(tok, 0) + 1
     n = len(books)
     return {tok: math.log((n + 1) / (count + 1)) + 1 for tok, count in df.items()}
+
+
+def _surface_forms(book: Books) -> dict[str, str]:
+    """Folded token -> the word as it actually appears in the book's text.
+
+    _text_tokens folds plurals into forms that aren't real words ("stories" and
+    "story" both become "stori"), which is fine for scoring and unreadable on a
+    page. This maps them back so a match explanation says "prophecy" rather
+    than "propheci". First occurrence wins, matching how a reader would skim it.
+    """
+    forms: dict[str, str] = {}
+    for tok in re.findall(r"[a-z]+", f"{book.title} {book.description}".lower()):
+        folded = _fold_token(tok)
+        forms.setdefault(folded, tok)
+    return forms
+
+
+# Display-only stopwords for reason lines.
+#
+# Corpus statistics can't do this job, which is worth recording because the
+# obvious fix is to reach for IDF: most provider records carry no description
+# at all, so the corpus is sparse enough that ordinary words look rare. Over a
+# 1329-book candidate pool for Mistborn, "will" had a document frequency of 10
+# (0.8%) against "kelsier" at 2 (0.2%) — both "rare", no threshold separates
+# them without also cutting the good tokens. So the bar for *showing* a token
+# is a fixed vocabulary of English function and filler words.
+#
+# Deliberately excludes words that look generic but carry real story meaning in
+# this domain — world, life, death, war, love, power, magic, king, empire.
+# Scoring is unaffected; this only decides what a reason line says out loud.
+_REASON_STOPWORDS = {
+    # modals, auxiliaries, pronouns, determiners, prepositions, conjunctions
+    "will", "would", "could", "should", "shall", "must", "might", "may", "can",
+    "been", "being", "does", "did", "done", "having", "them", "they", "their",
+    "these", "those", "there", "here", "which", "what", "when", "where", "who",
+    "whom", "whose", "while", "than", "then", "though", "although", "because",
+    "into", "onto", "over", "under", "above", "below", "after", "before",
+    "between", "through", "during", "against", "without", "within", "upon",
+    "about", "around", "along", "across", "toward", "towards", "behind",
+    # common adverbs / intensifiers
+    "very", "much", "many", "more", "most", "less", "least", "just", "only",
+    "even", "also", "still", "yet", "again", "once", "ever", "never", "always",
+    "often", "soon", "well", "back", "down", "away", "away", "together",
+    "almost", "already", "perhaps", "however", "instead", "rather", "quite",
+    # generic verbs
+    "make", "makes", "take", "takes", "give", "gives", "come", "comes", "went",
+    "know", "knows", "think", "thinks", "want", "wants", "need", "needs",
+    "find", "finds", "look", "looks", "seem", "seems", "become", "becomes",
+    "begin", "begins", "begun", "bring", "brings", "keep", "keeps", "hold",
+    "holds", "leave", "leaves", "turn", "turns", "help", "helps", "call",
+    "calls", "tell", "tells", "told", "says", "said", "ask", "asks", "use",
+    "uses", "used", "work", "works", "put", "puts", "let", "lets", "get",
+    "gets", "got", "goes", "going", "save", "saves", "show", "shows", "try",
+    "tries", "feel", "feels", "felt", "seen", "sees", "live", "lives",
+    # generic adjectives / quantities
+    "good", "great", "best", "better", "worse", "worst", "little", "big",
+    "small", "large", "high", "low", "long", "short", "old", "young", "true",
+    "real", "whole", "full", "same", "other", "another", "certain", "various",
+    "simple", "hard", "easy", "able", "sure", "far", "near", "next", "last",
+    "first", "second", "third", "own", "every", "each", "both", "few", "some",
+    "such", "several", "enough", "right", "wrong", "left",
+    # publishing / edition boilerplate that survives the scoring stopwords
+    "book", "books", "novel", "novels", "story", "stories", "series", "volume",
+    "edition", "author", "authors", "reader", "readers", "page", "pages",
+    "bestselling", "bestseller", "acclaimed", "award", "winning", "review",
+    "reviews", "publisher", "published", "publishing", "press", "times",
+    "collection", "includes", "featuring", "introduction", "translated",
+}
+_REASON_STOPWORDS = {_fold_token(w) for w in _REASON_STOPWORDS}
+
+_REASON_MAX_TOKENS = 4
+
+
+def _reason_tokens(
+    source: Books,
+    candidate: Books,
+    src_text: set[str],
+    idf: dict[str, float],
+    default_idf: float,
+) -> list[str]:
+    """The distinctive vocabulary two books share, as displayable words.
+
+    Excludes each book's own identity (title and author words): "books like
+    Mistborn" listing "mistborn" and "sanderson" as shared *themes* describes
+    the search query back to the reader instead of the story. Returns fewer
+    than the maximum — or none — rather than padding with filler.
+    """
+    identity: set[str] = set()
+    for text in (
+        source.title, candidate.title,
+        " ".join(source.authors), " ".join(candidate.authors),
+    ):
+        identity |= {_fold_token(t) for t in re.findall(r"[a-z]+", text.lower())}
+
+    shared = [
+        tok for tok in src_text & _text_tokens(candidate)
+        if tok not in identity and tok not in _REASON_STOPWORDS
+    ]
+    # IDF still orders them — it's a fine "which of these is more distinctive"
+    # signal even where it's too weak to be a cutoff.
+    shared.sort(key=lambda t: -idf.get(t, default_idf))
+
+    forms = _surface_forms(candidate)
+    return [forms.get(tok, tok) for tok in shared[:_REASON_MAX_TOKENS]]
+
+
+def _match_reason(
+    source: Books,
+    candidate: Books,
+    src_text: set[str],
+    src_genres: set[str],
+    idf: dict[str, float],
+    default_idf: float,
+) -> str:
+    """One human-readable line explaining why this book was matched.
+
+    This is the part of a public page that a scraped "books like X" listicle
+    can't reproduce without building the scorer, so it's worth the few lines:
+    it names the shared genres and the most distinctive shared vocabulary, i.e.
+    the two signals that actually drove the rank.
+    """
+    shared_genres = sorted(src_genres & set(_genre_atoms(candidate.tags)[0]))[:3]
+    tokens = [
+        word for word in _reason_tokens(source, candidate, src_text, idf, default_idf)
+        # Genre words already appear in the genre clause; don't say them twice.
+        if not any(word in genre for genre in shared_genres)
+    ]
+
+    parts = []
+    if shared_genres:
+        parts.append(f"Both are {_join_prose(shared_genres)}")
+    if tokens:
+        lead = "shared themes" if parts else "Shared themes"
+        parts.append(f"{lead}: {', '.join(tokens)}")
+    return "; ".join(parts) + "." if parts else ""
+
+
+def _join_prose(items: list[str]) -> str:
+    """['a', 'b', 'c'] -> 'a, b and c' — for reading, not for data."""
+    if len(items) <= 1:
+        return "".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+# At most this many books by one author on a public page. Two lets a genuine
+# "the rest of this author's work is also for you" signal through without the
+# list becoming a bibliography.
+SEO_AUTHOR_CAP = 2
+
+# Relevance floor for public pages, well above the app's MIN_SIMILAR_SCORE.
+# Measured on Mistborn: below this the tail was The War of the Worlds and a
+# Fear Street volume at 6% — real scores, wrong page. Trading list length for
+# a defensible worst entry is the right way round when the page's whole pitch
+# is that it explains its reasoning.
+SEO_MIN_SCORE = 0.12
+
+
+def similar_page_data(req: SimilarRequest) -> tuple[dict | None, list[dict]]:
+    """Source book + ranked results with match explanations, for a public page.
+
+    Used only by `scripts.generate_seo_pages` (offline), never in a request —
+    it runs the full live fetch and takes seconds per book.
+    """
+    source_book, top, candidates = _similar_core(
+        req, author_cap=SEO_AUTHOR_CAP, min_score=SEO_MIN_SCORE,
+    )
+    if source_book is None or not top:
+        return (_to_out(source_book) if source_book else None), []
+
+    idf = _compute_token_idf(candidates)
+    default_idf = math.log(len(candidates) + 1) + 1
+    src_text = _text_tokens(source_book)
+    src_genres = set(_genre_atoms(source_book.tags)[0])
+
+    results = []
+    for book, score in top:
+        out = _to_out(book, relevance=round(score * 100, 1))
+        out["reason"] = _match_reason(
+            source_book, book, src_text, src_genres, idf, default_idf
+        )
+        results.append(out)
+    return _to_out(source_book), results
 
 
 def _idf_weighted_f1(
@@ -964,6 +1210,7 @@ user_store = UserStore()
 library_store = LibraryStore()
 feedback_store = FeedbackStore()
 activity_store = ActivityStore()
+seo_store = SeoPageStore()
 rec_cache = RecommendationCache()
 login_throttle = LoginThrottle()
 
@@ -2486,3 +2733,123 @@ def _to_out(b, relevance: float | None = None) -> dict:
 @app.head("/", include_in_schema=False)
 def serve_frontend():
     return FileResponse(FRONTEND_DIR / "index.html")
+
+
+# ------------------------------------------------------------------ #
+# Public "books like X" pages — the site's indexable surface
+# ------------------------------------------------------------------ #
+# Server-rendered, generated offline by scripts.generate_seo_pages, read
+# straight from SQLite. No provider calls and no scoring happen here: a
+# crawler walking every slug costs one SELECT per page. See server/seo.py.
+TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+_templates = Environment(
+    loader=FileSystemLoader(str(TEMPLATES_DIR)),
+    autoescape=select_autoescape(["html", "xml"]),
+    trim_blocks=True,
+    lstrip_blocks=True,
+)
+
+# Canonical origin for <link rel=canonical>, og:url and the sitemap. Override
+# when running somewhere other than production so those URLs aren't wrong.
+BASE_URL = os.environ.get("BOOKREC_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
+
+# Static asset version for the public pages — bump alongside the ?v= in
+# index.html so a redeploy can't serve these pages a stale stylesheet.
+SEO_ASSET_VERSION = 15
+
+
+@app.get("/books-like", include_in_schema=False)
+@app.head("/books-like", include_in_schema=False)
+def books_like_index():
+    """Hub page listing every published book page.
+
+    Exists for crawl discovery as much as for readers: it gives every page an
+    internal link from a single reachable URL, so nothing depends on the
+    sitemap alone being fetched.
+    """
+    pages = seo_store.list_pages()
+    html = _templates.get_template("books_like_index.html").render(
+        pages=pages,
+        canonical=f"{BASE_URL}/books-like",
+        asset_version=SEO_ASSET_VERSION,
+    )
+    return HTMLResponse(html)
+
+
+@app.get("/books-like/{slug}", include_in_schema=False)
+@app.head("/books-like/{slug}", include_in_schema=False)
+def books_like_page(slug: str):
+    """One public recommendation page, or a real 404 for an unpublished slug."""
+    page = seo_store.get(slug)
+    if page is None:
+        html = _templates.get_template("not_found.html").render(
+            asset_version=SEO_ASSET_VERSION,
+        )
+        return HTMLResponse(html, status_code=404)
+
+    # Link a result onward only when it has its own page — a link to a 404
+    # wastes crawl budget and dead-ends a reader.
+    published = seo_store.published_slugs()
+    results = []
+    for item in page["results"]:
+        target = slugify(item.get("title", ""))
+        results.append({**item, "slug": target if target in published else None})
+
+    html = _templates.get_template("books_like.html").render(
+        source=page["source"],
+        source_title=page["source_title"],
+        results=results,
+        canonical=page_url(slug, BASE_URL),
+        generated_at=page["generated_at"],
+        asset_version=SEO_ASSET_VERSION,
+        jsonld=_books_like_jsonld(page["source_title"], results),
+    )
+    return HTMLResponse(html)
+
+
+def _books_like_jsonld(source_title: str, results: list[dict]) -> dict:
+    """schema.org ItemList for a recommendation page.
+
+    Built from the same list the template renders so the structured data can't
+    describe something the page doesn't show — Google treats that mismatch as
+    a manual-action-worthy offence.
+    """
+    return {
+        "@context": "https://schema.org",
+        "@type": "ItemList",
+        "name": f"Books like {source_title}",
+        "numberOfItems": len(results),
+        "itemListElement": [
+            {
+                "@type": "ListItem",
+                "position": i,
+                "item": {
+                    "@type": "Book",
+                    "name": item.get("title", ""),
+                    **(
+                        {"author": [
+                            {"@type": "Person", "name": a}
+                            for a in item.get("authors") or []
+                        ]}
+                        if item.get("authors") else {}
+                    ),
+                    **(
+                        {"url": page_url(item["slug"], BASE_URL)}
+                        if item.get("slug") else {}
+                    ),
+                },
+            }
+            for i, item in enumerate(results, start=1)
+        ],
+    }
+
+
+@app.get("/sitemap.xml", include_in_schema=False)
+def sitemap():
+    entries = [(p["slug"], p["generated_at"]) for p in seo_store.list_pages()]
+    return Response(sitemap_xml(entries, BASE_URL), media_type="application/xml")
+
+
+@app.get("/robots.txt", include_in_schema=False)
+def robots():
+    return PlainTextResponse(robots_txt(BASE_URL))

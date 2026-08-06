@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block title %}Books Like… — {{ pages | length }} Reading Recommendation Lists{% endblock %}
+
+{% block description %}Browse {{ pages | length }} "what to read next" lists, each ranking similar books by shared genre and subject matter with the reason for every match.{% endblock %}
+
+{% block styles %}
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+      gap: 0.5rem;
+    }
+    .grid a {
+      display: block;
+      padding: 0.7rem 0.9rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      text-decoration: none;
+      font-size: 0.9rem;
+    }
+    .grid a:hover { border-color: var(--accent); color: var(--strong); }
+    .empty { color: var(--muted); padding: 2rem 0; }
+{% endblock %}
+
+{% block content %}
+  <h1>Books Like…</h1>
+  <p class="lede">
+    {{ pages | length }} reading list{{ "" if pages | length == 1 else "s" }},
+    one per book. Each ranks similar titles by shared genre and subject matter,
+    and says why each one matched.
+  </p>
+
+  {% if pages %}
+  <div class="grid">
+    {% for page in pages %}
+    <a href="/books-like/{{ page.slug }}">Books like {{ page.title }}</a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="empty">
+    No lists published yet. Run <code>python -m scripts.generate_seo_pages</code>
+    to build them.
+  </p>
+  {% endif %}
+{% endblock %}
