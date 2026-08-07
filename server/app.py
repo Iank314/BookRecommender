@@ -480,6 +480,22 @@ class SimilarRequest(BaseModel):
 # shared token, and showing one wrong book reads worse than showing none.
 MIN_SIMILAR_SCORE = 0.05
 
+# How many Open Library results each genre query pulls.
+#
+# Raised from 300 after measuring the alternatives: for sources with thin
+# metadata a deeper pool is the only lever that moved. Shutter Island went from
+# 2 recommendations (top match 12%) at 300 to 7 (26%) at 700 and 10 at 1000,
+# while Mistborn — already healthy — was unchanged at 20/45%, so it doesn't
+# come at the good case's expense. Raising the candidate *enrichment* cap
+# instead did nothing at all, despite quadrupling genre coverage.
+#
+# It's close to free: measured cold-cache, 300 -> 1000 cost about a second on
+# one book and nothing measurable on the others, because the time goes on
+# round-trips rather than payload. The offline page generator has no latency
+# budget to protect, so it reaches further still.
+SIMILAR_OL_BATCH = 700
+SEO_OL_BATCH = 1000
+
 # Below this many folded tokens, a source's "description" is title words plus
 # provider boilerplate rather than a blurb, and ranking candidates by overlap
 # with it is noise. Measured: Harry Potter's enriched record yields 5 tokens,
@@ -555,7 +571,7 @@ def _enrich_source_by_title_lookup(source: Books) -> None:
 
 
 def _gather_similar_candidates(
-    req: SimilarRequest,
+    req: SimilarRequest, ol_batch: int = SIMILAR_OL_BATCH,
 ) -> tuple[Books, str | None, list[Books]]:
     """Candidate-gathering half of "Find Similar": build genre queries from
     the source's tags, fetch from both providers, keep the source's language,
@@ -655,7 +671,7 @@ def _gather_similar_candidates(
         # OL batch 300 (vs recommend's default 200): a single source book gets
         # fewer queries, so each casts a wider net into OL's long tail.
         fetched = list(ex.map(
-            lambda q: _fetch_genre_candidates(q, ol_batch=300), genre_queries))
+            lambda q: _fetch_genre_candidates(q, ol_batch=ol_batch), genre_queries))
     for books in fetched:
         for b in books:
             if _is_about_source(b, filter_words, author_surnames):
@@ -724,6 +740,7 @@ def _similar_core(
     req: SimilarRequest,
     author_cap: int | None = None,
     min_score: float = MIN_SIMILAR_SCORE,
+    ol_batch: int = SIMILAR_OL_BATCH,
 ) -> tuple[Books | None, list[tuple[Books, float]], list[Books]]:
     """The /similar pipeline up to the final ranked list.
 
@@ -742,7 +759,7 @@ def _similar_core(
     because a weak extra result costs a user one glance; on a public page the
     worst entry is what a first-time visitor judges the whole site by.
     """
-    source_book, src_lang, candidates = _gather_similar_candidates(req)
+    source_book, src_lang, candidates = _gather_similar_candidates(req, ol_batch)
     if not candidates:
         return None, [], []
 
@@ -1039,6 +1056,7 @@ def similar_page_data(req: SimilarRequest) -> tuple[dict | None, list[dict]]:
     """
     source_book, top, candidates = _similar_core(
         req, author_cap=SEO_AUTHOR_CAP, min_score=SEO_MIN_SCORE,
+        ol_batch=SEO_OL_BATCH,
     )
     if source_book is None or not top:
         return (_to_out(source_book) if source_book else None), []
@@ -2404,8 +2422,11 @@ def _fetch_genre_candidates(query: str, ol_batch: int = 200) -> list[Books]:
     """Fetch Google Books + Open Library results for one genre query.
 
     Warn-and-continue per provider so one failing source doesn't empty the
-    pool. Shared by /library/recommend (default batch) and /similar
-    (ol_batch=300)."""
+    pool — which matters more than it looks: Open Library read-timeouts are
+    common enough that a measurement run saw every query for one book fail at
+    once, and without Google Books answering alongside it that book returned
+    an empty list. Shared by /library/recommend (default batch) and /similar
+    (SIMILAR_OL_BATCH)."""
     out: list[Books] = []
     try:
         gb_books, _ = Fetcher(source=GOOGLE_ENDPOINT).fetch_google_page(

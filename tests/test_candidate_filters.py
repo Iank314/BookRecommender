@@ -203,3 +203,39 @@ def test_inference_folds_plurals_like_the_tokeniser():
     # folding, "dwarves" would silently stop matching "dwarve".
     assert _infer_genre_from_content("elf dwarf") == "Fantasy"
     assert _infer_genre_from_content("elves dwarves") == "Fantasy"
+
+
+# ------------------------------------------------------- candidate pool size
+# Measured: for sources with thin metadata, a deeper candidate pool was the
+# only lever that helped. Shutter Island went 2 recommendations (top 12%) at
+# batch 300 to 7 (26%) at 700 and 10 at 1000; Mistborn, already healthy, was
+# unchanged. Raising the enrichment cap instead changed nothing anywhere.
+
+def test_similar_uses_a_deeper_pool_than_the_library_default():
+    # /library/recommend scores against a whole library, so it has signal to
+    # spare; /similar has one book and needs the wider net.
+    from server.app import SIMILAR_OL_BATCH, _fetch_genre_candidates
+    import inspect
+
+    library_default = inspect.signature(_fetch_genre_candidates).parameters["ol_batch"].default
+    assert SIMILAR_OL_BATCH > library_default
+
+
+def test_offline_generation_reaches_further_than_the_live_endpoint():
+    # Nobody waits on a page built once a week, so the generator can afford a
+    # pool the request path can't.
+    from server.app import SEO_OL_BATCH, SIMILAR_OL_BATCH
+
+    assert SEO_OL_BATCH > SIMILAR_OL_BATCH
+
+
+def test_batch_size_is_threaded_through_to_the_fetch():
+    # Guards the wiring: _similar_core -> _gather_similar_candidates -> fetch.
+    # A default that stopped being passed would silently revert the pool size.
+    import inspect
+    from server.app import (
+        SIMILAR_OL_BATCH, _gather_similar_candidates, _similar_core,
+    )
+
+    for fn in (_gather_similar_candidates, _similar_core):
+        assert inspect.signature(fn).parameters["ol_batch"].default == SIMILAR_OL_BATCH
