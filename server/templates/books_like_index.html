@@ -39,9 +39,11 @@
     {% endfor %}
   </div>
   {% else %}
+  {# Reachable in production between a deploy and the first generator run, so
+     it has to read as a page, not as a note to the operator. #}
   <p class="empty">
-    No lists published yet. Run <code>python -m scripts.generate_seo_pages</code>
-    to build them.
+    These lists are being built. In the meantime you can
+    <a href="/">search for any book</a> and get similar titles straight away.
   </p>
   {% endif %}
 {% endblock %}

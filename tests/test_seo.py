@@ -313,7 +313,7 @@ def test_index_page_lists_every_published_page():
 
 def test_index_page_handles_an_empty_site():
     html = _render("books_like_index.html", pages=[], canonical="x")
-    assert "No lists published yet" in html
+    assert "being built" in html
 
 
 def test_not_found_template_renders():
