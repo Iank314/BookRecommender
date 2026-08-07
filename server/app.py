@@ -35,6 +35,7 @@ from server.models.book import Books
 from server.recommender.recommendation_engine import RecommendationEngine
 from server.recommender.recommender import Recommender
 from server.seo import (
+    CORE_GENRES,
     DEFAULT_BASE_URL,
     page_url,
     robots_txt,
@@ -479,6 +480,12 @@ class SimilarRequest(BaseModel):
 # shared token, and showing one wrong book reads worse than showing none.
 MIN_SIMILAR_SCORE = 0.05
 
+# Below this many folded tokens, a source's "description" is title words plus
+# provider boilerplate rather than a blurb, and ranking candidates by overlap
+# with it is noise. Measured: Harry Potter's enriched record yields 5 tokens,
+# The Fellowship of the Ring 78, Mistborn 115 — real blurbs clear it easily.
+_MIN_SOURCE_TEXT_TOKENS = 12
+
 # /similar is anonymous and re-runs the whole fetch+score pipeline per click,
 # so identical clicks within the TTL window are served from memory. Keyed on
 # the source book's identity (title+authors+tags+description), not a user.
@@ -589,19 +596,44 @@ def _gather_similar_candidates(
         for w in a.lower().replace(".", " ").split():
             if len(w) > 2:
                 author_words.add(w)
-    # Extract title words to filter out (e.g. "harry", "potter")
-    title_words = {w for w in title_lower.split() if len(w) > 2}
+    # Extract title words to filter out (e.g. "harry", "potter"). Stopwords are
+    # excluded: "the" is three characters and would otherwise be evidence that
+    # a candidate is *about* the source, so "The Stone Sky" would score two
+    # matches against "Harry Potter and the Sorcerer's Stone" and be dropped.
+    title_words = {
+        w for w in re.findall(r"[a-z0-9']+", title_lower)
+        if len(w) > 2 and w not in _SIM_STOPWORDS
+    }
 
     genre_queries = _similar_genre_queries(
         source_book.tags,  # post-enrichment, may be richer than req.tags
         title_words, author_words,
     )
     if not genre_queries:
-        # No usable tags at all — scan title + description for a known genre
+        # No tag names a genre — scan title + description for a known genre
         # keyword (same fallback the display layer uses) before surrendering
         # to "fiction", whose candidates are mostly random classics.
         derived = _derive_genre_from_text(f"{source_book.title} {source_book.description}")
+        if not derived:
+            # Nothing *names* a genre — infer one from story vocabulary. Tags
+            # are included in the haystack because that's where the evidence
+            # usually is: the facets a catalogue records ("Elves", "Dwarves",
+            # "psychiatric hospital patients") describe the story even when
+            # they don't name its genre.
+            derived = _infer_genre_from_content(
+                f"{source_book.title} {source_book.description} "
+                f"{' '.join(source_book.tags)}"
+            )
         genre_queries = [derived.lower()] if derived else ["fiction"]
+        # Give the scorer the same genre the pool was fetched with. Without
+        # this the source's profile stays pure facets ("Wizards, fiction",
+        # "Magic, fiction" for Harry Potter) which overlap nothing in a
+        # fantasy pool, so every candidate scores ~0 on genre and the blend
+        # drops the whole list below MIN_SIMILAR_SCORE. Prepended rather than
+        # replacing: the facets still earn overlap against candidates that
+        # genuinely share them.
+        if derived:
+            source_book.tags = [derived] + list(source_book.tags)
 
     # Up to 5 atom queries — slash-splitting often produces more useful atoms.
     genre_queries = genre_queries[:5]
@@ -615,6 +647,9 @@ def _gather_similar_candidates(
 
     # Words to check for "about the source" filtering
     filter_words = title_words | author_words
+    # Surnames get their own, stricter rule (a title carrying the author's
+    # surname is a biography, not a novel), so keep them separable.
+    author_surnames = {s for s in map(_author_surname, req.authors) if len(s) > 2}
 
     with ThreadPoolExecutor(max_workers=min(8, len(genre_queries))) as ex:
         # OL batch 300 (vs recommend's default 200): a single source book gets
@@ -623,7 +658,7 @@ def _gather_similar_candidates(
             lambda q: _fetch_genre_candidates(q, ol_batch=300), genre_queries))
     for books in fetched:
         for b in books:
-            if _is_about_source(b, filter_words):
+            if _is_about_source(b, filter_words, author_surnames):
                 continue
             dk = _dedup_key(b)
             if dk not in seen_keys:
@@ -1138,15 +1173,28 @@ def _feedback_modifier(
 W_GENRE, W_DESC = 0.4, 0.6
 
 
-def _blend_genre_desc(genre_score: float, desc_score: float, has_genres: bool) -> float:
+def _blend_genre_desc(
+    genre_score: float, desc_score: float, has_genres: bool,
+    source_has_text: bool = True,
+) -> float:
     """Combine genre-overlap and description-similarity into one score.
 
     Blended (description-weighted) when the candidate carries genre tags; judged
     on description alone when it doesn't, so a tagless book isn't dragged down by
-    a zero genre_score it never had a chance to earn."""
-    if has_genres:
-        return W_GENRE * genre_score + W_DESC * desc_score
-    return desc_score
+    a zero genre_score it never had a chance to earn.
+
+    `source_has_text=False` is the mirror image: when the *source* has no real
+    description (providers often return "First published in 2000. | By ..." and
+    call it a blurb), every desc_score is ~0, and blending them in would drag
+    a perfect genre match down to W_GENRE — 0.4 at best, and near zero once the
+    description weight dominates. Judge on genre alone instead, for the same
+    reason: don't penalise a book for a signal it never had a chance to earn.
+    """
+    if not has_genres:
+        return desc_score
+    if not source_has_text:
+        return genre_score
+    return W_GENRE * genre_score + W_DESC * desc_score
 
 
 def _score_similar_candidates(
@@ -1168,6 +1216,13 @@ def _score_similar_candidates(
     if not src_text and not src_genres:
         return []
 
+    # "Has text" has to mean a usable description, not merely a non-empty one.
+    # Harry Potter's record enriches to "First published in 2000. | By J. K.
+    # Rowling." — five tokens, nearly all of them the title. That counted as
+    # having text, so the require-some-overlap rule below dropped 288 of 289
+    # candidates for failing to share words with a sentence that says nothing.
+    source_has_text = len(src_text) >= _MIN_SOURCE_TEXT_TOKENS
+
     idf = _compute_token_idf(candidates)
     default_idf = math.log(len(candidates) + 1) + 1
 
@@ -1177,14 +1232,18 @@ def _score_similar_candidates(
             continue  # no description — genre alone is too weak to recommend on
         cand_text = _text_tokens(cand)
         desc_score = _idf_weighted_f1(src_text, cand_text, idf, default_idf)
-        # When the source has text, a candidate must share some of it — genre
-        # overlap alone can't rank it (every candidate was fetched by genre).
-        if src_text and desc_score <= 0:
+        # When the source has a real description, a candidate must share some
+        # of it — genre overlap alone can't rank it (every candidate was
+        # fetched by genre). When it doesn't, genre is all there is.
+        if source_has_text and desc_score <= 0:
             continue
         cand_genres = set(_genre_atoms(cand.tags)[0])
+        if not source_has_text and not cand_genres:
+            continue  # neither signal available on either side
         combined = _blend_genre_desc(
             _genre_score(cand_genres, src_genres), desc_score,
-            has_genres=bool(cand_genres and src_genres))
+            has_genres=bool(cand_genres and src_genres),
+            source_has_text=source_has_text)
         if combined <= 0:
             continue
         final = combined * (1.0 + 0.05 * _book_popularity(cand))
@@ -1194,13 +1253,90 @@ def _score_similar_candidates(
     return scored
 
 
-def _is_about_source(book, filter_words: set) -> bool:
-    """Check if a book is about the source (biography, companion, etc.)."""
-    title_lower = book.title.lower()
-    title_word_set = set(title_lower.split())
-    # If 2+ filter words appear in the title, it's likely about the source
-    matches = title_word_set & filter_words
-    return len(matches) >= 2
+# Words and phrases that mark a candidate as merchandise or companion material
+# rather than a book to read next. Matched as whole words / substrings against
+# the candidate's title.
+#
+# The cost here is deliberately asymmetric: recommending a poster book to
+# someone who liked Harry Potter is much worse than failing to recommend a
+# novel with "journal" in its title. A few legitimate books get caught ("The
+# Art of War"), and that's the right trade.
+# Restricted to words that essentially never title a novel. Ambiguous ones were
+# removed after checking them against real books: "notebook" rejects Nicholas
+# Sparks' The Notebook, "journal" rejects Journal of a Solitude, and "puzzle" /
+# "trivia" / "quiz" are all plausible novel titles. Tie-ins carrying those words
+# ("Hogwarts journal") are usually caught by the franchise-word rule instead,
+# and letting a few slip through beats blacklisting bestsellers.
+_MERCH_TITLE_WORDS = frozenset({
+    "poster", "posters", "calendar", "calendars", "sticker", "stickers",
+    "postcard", "postcards", "coloring", "colouring", "sparknotes",
+    "cliffsnotes", "scrapbook", "screenplay", "photoplay", "songbook",
+})
+# Phrases are safer than single words, but not automatically: "the art of" and
+# "the making of" were dropped for rejecting The Art of Racing in the Rain and
+# The Art of War. Franchise art books repeat the franchise name in their title
+# ("The Art of The Fellowship of the Ring"), so the franchise-word rule catches
+# them without the collateral damage.
+_MERCH_TITLE_PHRASES = (
+    "study guide", "activity book", "behind the scenes",
+    "summary and analysis", "a summary of", "unofficial guide",
+    "official companion", "reader's guide", "teacher's guide", "lesson plans",
+    "cliff's notes",
+)
+
+
+def _author_surname(name: str) -> str:
+    """Surname from either "J. K. Rowling" or the catalogue form "Rowling, J. K.".
+
+    Providers use both, and taking the last word unconditionally turns the
+    second form into "k" — which would then match nothing.
+    """
+    cleaned = name.split(",")[0] if "," in name else name
+    parts = cleaned.split()
+    return parts[-1].lower().strip(".'\"") if parts else ""
+
+
+def _title_words(title: str) -> set[str]:
+    """Lowercased word set from a title, punctuation stripped.
+
+    Splitting on whitespace alone leaves "(harry" and "potter!" attached to
+    their punctuation, which is why the merch filter below used to miss
+    "Lenticular Poster Book (Harry Potter)" and "We love Harry Potter!".
+    """
+    return set(re.findall(r"[a-z0-9']+", title.lower()))
+
+
+def _is_merchandise(title: str) -> bool:
+    """Whether a title looks like a tie-in product rather than a novel."""
+    lowered = title.lower()
+    if any(phrase in lowered for phrase in _MERCH_TITLE_PHRASES):
+        return True
+    return bool(_title_words(title) & _MERCH_TITLE_WORDS)
+
+
+def _is_about_source(book, filter_words: set, author_surnames: set = frozenset()) -> bool:
+    """Whether a candidate is *about* the source rather than similar to it.
+
+    Three signals, all of which produced real bad recommendations before:
+      - two or more of the source's title/author words in the candidate title
+        (companions, tie-ins: "We love Harry Potter!")
+      - the source author's surname in the title by a *different* author
+        (biographies: "J.K. Rowling" by Colleen A. Sexton). One word is enough
+        here — a novel almost never carries its own author's surname.
+      - merchandise formats (posters, journals, art books, study guides)
+    """
+    if _is_merchandise(book.title):
+        return True
+
+    title_word_set = _title_words(book.title)
+    if author_surnames & title_word_set:
+        by_that_author = any(
+            surname in _title_words(a) for a in book.authors for surname in author_surnames
+        )
+        if not by_that_author:
+            return True
+
+    return len(title_word_set & filter_words) >= 2
 
 
 # ------------------------------------------------------------------ #
@@ -1751,10 +1887,10 @@ def _similar_genre_queries(
 
     Atom cleanup is shared with _genre_atoms via _tag_atoms; on top of that,
     atoms that are basically the source's title or author are skipped (they'd
-    fetch books *about* the source), and generic tags ("Fiction",
-    "Literature") are used only when nothing specific survives — on their own
-    they return mostly classics via OL's subject search. Original case is
-    kept for the outgoing queries. Returns [] when no usable tag exists.
+    fetch books *about* the source), and only atoms naming a real genre
+    survive — see the comment on the return. Original case is kept for the
+    outgoing queries. Returns [] when no tag names a genre, which is the
+    caller's signal to derive one from the title and description instead.
     """
     specific: list[str] = []
     generic: list[str] = []
@@ -1781,7 +1917,24 @@ def _similar_genre_queries(
                 generic.append(atom)
             else:
                 specific.append(atom)
-    return specific or generic
+
+    # Keep only atoms that name an actual genre. Open Library's subject tags
+    # are catalogue facets as often as genres, and a facet makes a
+    # catastrophic subject-search query: The Hunger Games resolves to
+    # ["effects of war", "oppression", "self-sacrifice", "severe poverty"],
+    # which fetched a pool of famine studies that no amount of scoring could
+    # rescue.
+    #
+    # Returning [] rather than falling back to the generic atoms is
+    # deliberate. "Fiction" as a subject search returns mostly random
+    # classics, whereas [] hands the caller to _derive_genre_from_text, which
+    # reads the title and blurb — that's how Harry Potter, whose only atoms
+    # are "magic" and two proper nouns, still gets a fantasy candidate pool.
+    # The caller falls back to "fiction" itself if derivation finds nothing.
+    return [
+        atom for atom in specific
+        if _GENRE_SYNONYMS.get(atom.lower(), atom.lower()) in CORE_GENRES
+    ]
 
 
 def _library_genre_profile(
@@ -2189,20 +2342,28 @@ def _enrich_tagless_candidates(candidates: list[Books], saved: list[Books]) -> N
     lib_tokens: set[str] = set()
     for b in saved:
         lib_tokens |= _text_tokens(b)
-    if not lib_tokens:
+
+    tagless = [
+        c for c in candidates
+        if not c.tags and c.id.startswith("ol_/works/")
+    ]
+    if not tagless:
         return
 
-    targets: list[tuple[int, Books]] = []
-    for c in candidates:
-        if c.tags or not c.id.startswith("ol_/works/"):
-            continue
-        overlap = len(_text_tokens(c) & lib_tokens)
-        if overlap > 0:
-            targets.append((overlap, c))
-    if not targets:
-        return
-    targets.sort(key=lambda x: x[0], reverse=True)
-    to_enrich = [c for _, c in targets[:_ENRICH_LIMIT]]
+    targets = [(len(_text_tokens(c) & lib_tokens), c) for c in tagless]
+    ranked = [(overlap, c) for overlap, c in targets if overlap > 0]
+    if not ranked:
+        # Deadlock breaker. Ranking by overlap assumes the source has text to
+        # overlap *with*: Harry Potter's record enriches to the boilerplate
+        # "First published in 2000. | By J. K. Rowling.", five tokens, which
+        # overlaps nothing. Nothing then gets enriched, so no candidate has a
+        # genre, so the scorer has neither signal and the entire list scores
+        # zero — the source's poverty starves the candidates too. Falling back
+        # to popularity at least gives the pool genre coverage to be judged on.
+        ranked = [(_book_popularity(c), c) for c in tagless]
+
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    to_enrich = [c for _, c in ranked[:_ENRICH_LIMIT]]
 
     detail_fetcher = Fetcher(source=OPENLIB_ENDPOINT)
 
@@ -2652,6 +2813,71 @@ def _derive_genre_from_text(text: str) -> str | None:
             if re.search(r"\b" + re.escape(pat) + r"\b", haystack):
                 return label
     return None
+
+
+# Genre inference from story vocabulary, for records that name no genre at all.
+#
+# Held-out measurement across 37 books: 14 of them (38%) carried no recognised
+# genre atom, and those returned 0-3 recommendations while books that had one
+# returned 13-20. It's the dominant failure mode, and it isn't a fantasy
+# problem — The Big Sleep, Fourth Wing, Murder on the Orient Express and
+# Rebecca all land in it. Often the evidence is sitting in the facets nobody
+# read as genre evidence: The Fellowship of the Ring is tagged "Elves",
+# "Dwarves"; Shutter Island is tagged "brainwashing", "psychiatric hospital
+# patients".
+#
+# Consulted only when the tags name no genre, so a book that says what it is
+# is always believed over a word count. Two distinct markers are required,
+# which keeps one stray "magic" in a memoir from retagging it as fantasy.
+_GENRE_CONTENT_MARKERS: list[tuple[str, set[str]]] = [
+    ("LitRPG", {"litrpg", "dungeon", "respawn", "mana", "levelling", "leveling",
+                "stat", "skill", "guild", "grind", "loot", "quest", "npc"}),
+    ("Fantasy", {"elves", "elf", "dwarves", "dwarf", "orc", "goblin", "troll",
+                 "wizard", "sorcerer", "sorceress", "sorcery", "mage", "magic",
+                 "magical", "spell", "enchanted", "dragon", "necromancer",
+                 "warlock", "witch", "druid", "faerie", "fae", "rune",
+                 "prophecy", "kingdom", "realm", "quest", "wizardry", "sword"}),
+    ("Science Fiction", {"spaceship", "starship", "spacecraft", "galaxy",
+                         "galactic", "planet", "alien", "android", "robot",
+                         "cyborg", "interstellar", "terraform", "hyperspace",
+                         "dystopia", "dystopian", "apocalypse", "clone",
+                         "cloning", "orbit", "colony", "mutant", "starfarer"}),
+    ("Horror", {"haunted", "haunting", "ghost", "demon", "demonic", "vampire",
+                "werewolf", "zombie", "possessed", "exorcism", "occult",
+                "monster", "supernatural", "nightmare", "cursed", "undead"}),
+    ("Mystery", {"detective", "murder", "homicide", "killer", "suspect",
+                 "clue", "sleuth", "alibi", "whodunit", "inspector",
+                 "forensic", "disappearance", "investigating"}),
+    ("Thriller", {"conspiracy", "assassin", "espionage", "spy", "terrorist",
+                  "hostage", "kidnapped", "manhunt", "blackmail", "asylum",
+                  "psychiatric", "brainwashing", "amnesia", "paranoia",
+                  "marshal", "fugitive", "surveillance"}),
+    ("Romance", {"romance", "lovers", "wedding", "marriage", "heartbreak",
+                 "courtship", "seduction", "passion", "bride", "groom",
+                 "soulmate", "engagement", "flirtation"}),
+]
+# Markers are folded the way _text_tokens folds candidate text, so "dwarves"
+# and "dwarve" compare equal on both sides.
+_GENRE_CONTENT_MARKERS = [
+    (label, {_fold_token(w) for w in words}) for label, words in _GENRE_CONTENT_MARKERS
+]
+_MIN_GENRE_MARKERS = 2
+
+
+def _infer_genre_from_content(text: str) -> str | None:
+    """Best-guess genre from story vocabulary, or None if nothing is clear.
+
+    Deliberately separate from _derive_genre_from_text, which looks for a genre
+    *named* in the text and is also used by the display layer — inference is a
+    guess, and a guess shouldn't rewrite the tags a user sees on a book card.
+    """
+    tokens = {_fold_token(w) for w in re.findall(r"[a-z]+", text.lower())}
+    best, best_hits = None, 0
+    for label, markers in _GENRE_CONTENT_MARKERS:
+        hits = len(tokens & markers)
+        if hits > best_hits:
+            best, best_hits = label, hits
+    return best if best_hits >= _MIN_GENRE_MARKERS else None
 
 
 def _clean_tags_for_display(tags: list[str], description: str, title: str) -> list[str]:

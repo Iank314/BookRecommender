@@ -95,21 +95,11 @@ def generate_one(
     if not slug:
         return "", None, [], f"title produced an empty slug ({source.title!r})"
 
-    # Check the source record *before* scoring: it's the expensive step, and a
-    # record with no genre or the wrong edition can't produce a good page no
-    # matter how well it scores.
-    specific, generic = _genre_atoms(source.tags or [])
-    atoms = set(specific) | set(generic)
-    if is_excluded_edition(atoms):
-        return slug, None, [], (
-            f"resolved to a study-guide/criticism edition ({sorted(atoms)[:3]})"
-        )
-    if not has_core_genre(set(specific)):
-        return slug, None, [], (
-            f"source record carries no genre, only subject facets "
-            f"({sorted(atoms)[:4]})"
-        )
-
+    # The genre checks can't run here, tempting as it is to reject before the
+    # expensive fetch: a freshly-resolved record almost always arrives with
+    # tags=[], and _gather_similar_candidates is what back-fills them. Gating
+    # on the pre-enrichment record rejected all 30 books in a validation run
+    # for "carrying no genre" when what they carried was nothing at all.
     req = SimilarRequest(
         id=source.id, title=source.title, authors=source.authors,
         description=source.description, tags=source.tags, top_n=top_n,
@@ -134,6 +124,24 @@ def page_atoms(source: dict, results: list[dict]) -> tuple[set[str], list[set[st
     return atoms(source.get("tags", [])), [atoms(r.get("tags", [])) for r in results]
 
 
+def gate_page(source: dict, results: list[dict], min_results: int) -> tuple[bool, str]:
+    """The full publish decision for a scored page: (ok, reason-if-not).
+
+    Shared by generation and --prune so a page can't pass one and fail the
+    other. Operates on the stored dicts — post-enrichment, post-display
+    cleanup — which is the only point at which the source's genre is known.
+    """
+    specific, generic = _genre_atoms(source.get("tags", []))
+    atoms = set(specific) | set(generic)
+    if is_excluded_edition(atoms):
+        return False, f"study-guide/criticism edition ({sorted(atoms)[:3]})"
+    if not has_core_genre(set(specific)):
+        return False, f"source has no genre, only facets ({sorted(atoms)[:4]})"
+    return should_publish(
+        results, *page_atoms(source, results), min_results=min_results,
+    )
+
+
 def prune(store: SeoPageStore, min_results: int, dry_run: bool) -> None:
     """Re-apply the current gate to already-published pages, unpublishing fails.
 
@@ -144,21 +152,9 @@ def prune(store: SeoPageStore, min_results: int, dry_run: bool) -> None:
     removed = 0
     for meta in store.list_pages():
         page = store.get(meta["slug"])
-        source, results = page["source"], page["results"]
-
-        specific, generic = _genre_atoms(source.get("tags", []))
-        atoms = set(specific) | set(generic)
-        if is_excluded_edition(atoms):
-            why = f"study-guide/criticism edition ({sorted(atoms)[:3]})"
-        elif not has_core_genre(set(specific)):
-            why = f"source has no genre, only facets ({sorted(atoms)[:4]})"
-        else:
-            ok, reason = should_publish(
-                results, *page_atoms(source, results), min_results=min_results,
-            )
-            if ok:
-                continue
-            why = reason
+        ok, why = gate_page(page["source"], page["results"], min_results)
+        if ok:
+            continue
 
         print(f"  {'would remove' if dry_run else 'removed'} /{meta['slug']}: {why}")
         if not dry_run:
@@ -229,9 +225,7 @@ def main() -> None:
             continue
 
         top = max((r.get("relevance") or 0) for r in results) if results else 0
-        ok, why = should_publish(
-            results, *page_atoms(source, results), min_results=args.min_results,
-        )
+        ok, why = gate_page(source, results, args.min_results)
         if not ok:
             print(f"{prefix}: below gate — {why}")
             skipped += 1

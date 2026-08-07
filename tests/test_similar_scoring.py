@@ -131,9 +131,18 @@ def test_trailing_period_stripped_from_queries():
     assert queries == ["Fantasy fiction"]
 
 
-def test_generic_tags_only_used_as_fallback():
+def test_only_real_genres_become_queries():
     assert _similar_genre_queries(["Fiction", "Epic Fantasy"], set(), set()) == ["Epic Fantasy"]
-    assert _similar_genre_queries(["Fiction"], set(), set()) == ["Fiction"]
+
+
+def test_generic_and_facet_tags_produce_no_queries():
+    # Returning [] is the caller's signal to derive a genre from the title and
+    # description, which beats both options available here: "Fiction" as a
+    # subject search returns random classics, and a facet search returns books
+    # about the facet — The Hunger Games' ["severe poverty", "effects of war"]
+    # fetched a pool of famine studies.
+    assert _similar_genre_queries(["Fiction"], set(), set()) == []
+    assert _similar_genre_queries(["Severe poverty", "Effects of war"], set(), set()) == []
 
 
 def test_title_and_author_atoms_are_skipped():
@@ -142,3 +151,80 @@ def test_title_and_author_atoms_are_skipped():
         title_words={"harry", "potter"}, author_words={"rowling"},
     )
     assert queries == ["Fantasy"]
+
+
+# ---------------------------------------------------------------------------
+# Sources with no usable description
+#
+# Providers frequently return a "description" that is publication boilerplate
+# ("First published in 2000. | By ...") — a handful of tokens, none of them
+# about the story. Two rules used to conspire against that case: the scorer
+# required a candidate to share description tokens with the source, and the
+# blend weighted description above genre. Together they scored an entire
+# candidate pool at zero.
+#
+# These use synthetic books on purpose. The bug was found on specific titles,
+# but pinning the tests to those titles would fix the thresholds to the five
+# books that happened to be looked at.
+# ---------------------------------------------------------------------------
+
+from server.app import _blend_genre_desc, _MIN_SOURCE_TEXT_TOKENS  # noqa: E402
+
+BOILERPLATE_SOURCE = _bk(
+    "src2", "The Silent Tower",
+    description="First published in 1998.",   # under the token threshold
+    tags=["Fantasy"],
+)
+
+
+def test_blend_uses_genre_alone_when_the_source_has_no_text():
+    # Otherwise a perfect genre match is multiplied down by a meaningless
+    # zero description score.
+    assert _blend_genre_desc(1.0, 0.0, has_genres=True, source_has_text=False) == 1.0
+
+
+def test_blend_uses_description_alone_when_the_candidate_has_no_genres():
+    assert _blend_genre_desc(0.0, 0.42, has_genres=False) == 0.42
+
+
+def test_blend_is_weighted_when_both_signals_exist():
+    blended = _blend_genre_desc(1.0, 1.0, has_genres=True, source_has_text=True)
+    assert blended == 1.0
+    partial = _blend_genre_desc(1.0, 0.0, has_genres=True, source_has_text=True)
+    assert 0.0 < partial < 1.0   # genre alone can't reach the top when text exists
+
+
+def test_textless_source_still_ranks_genre_matches():
+    # The regression: every candidate scored 0 and the list came back empty.
+    same_genre = _bk("a", "Tower of Ash", description="A mage climbs a tower.",
+                     tags=["Fantasy"])
+    other_genre = _bk("b", "Quarterly Returns",
+                      description="A study of corporate accounting practice.",
+                      tags=["Business & Economics"])
+    scored = _score_similar_candidates(BOILERPLATE_SOURCE, [same_genre, other_genre])
+    assert scored, "a source with boilerplate text must still rank on genre"
+    assert scored[0][0].id == "a"
+
+
+def test_textless_source_ignores_candidates_with_no_genre_either():
+    # With neither signal on either side there is nothing to rank on, so an
+    # honest empty beats an arbitrary ordering.
+    untagged = _bk("c", "Something", description="A book about things.")
+    assert _score_similar_candidates(BOILERPLATE_SOURCE, [untagged]) == []
+
+
+def test_a_real_blurb_still_requires_shared_description():
+    # The genre-only path must not leak into sources that do have text, or
+    # every book fetched by genre would rank equally.
+    genre_only = _bk("d", "Unrelated Tale",
+                     description="Corporate accounting in the modern firm.",
+                     tags=["Fantasy", "Epic Fantasy"])
+    scored = _score_similar_candidates(SOURCE, [genre_only])
+    assert scored == []
+
+
+def test_token_threshold_separates_boilerplate_from_a_real_blurb():
+    from server.app import _text_tokens
+
+    assert len(_text_tokens(BOILERPLATE_SOURCE)) < _MIN_SOURCE_TEXT_TOKENS
+    assert len(_text_tokens(SOURCE)) > _MIN_SOURCE_TEXT_TOKENS
