@@ -478,7 +478,28 @@ class SimilarRequest(BaseModel):
 
 # Results scoring below this floor are dropped: at ~0.05 a "match" is a single
 # shared token, and showing one wrong book reads worse than showing none.
-MIN_SIMILAR_SCORE = 0.05
+# Relevance floor for /similar.
+#
+# Raised from 0.05 once _similar_genre_score made the bands separate. Measured
+# across 8 books spanning fantasy, sci-fi, mystery, romance and horror — 122
+# candidates sharing a genre with their source, 174 sharing none:
+#
+#   shares a genre   p10 19.9%   median 36.4%
+#   shares none      p75  2.6%   max    12.5%
+#
+#   floor  5%: keeps 122/122 genre-sharing, 19/174 non-sharing
+#   floor 15%: keeps 122/122 genre-sharing,  0/174 non-sharing
+#   floor 20%: keeps 107/122 genre-sharing,  0/174 non-sharing
+#
+# 15% is where the two populations stop overlapping; 20% starts costing real
+# matches. Note the split above uses the same genre test the scorer does, so it
+# locates the boundary rather than proving genre agreement means a *good*
+# recommendation — that judgement came from reading the lists.
+#
+# Multi-genre sources sit lower than single-genre ones (Mistborn's median is
+# 21%, The Hobbit's 39%) because coverage is a fraction of the source's
+# profile, so don't raise this without re-measuring those.
+MIN_SIMILAR_SCORE = 0.15
 
 # How many Open Library results each genre query pulls.
 #
