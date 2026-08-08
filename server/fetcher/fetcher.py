@@ -27,6 +27,29 @@ OPENLIB_BASE     = "https://openlibrary.org"
 # (connect, read) timeouts — fail fast instead of stalling ~60s on a dead socket.
 _HTTP_TIMEOUT = (5, 15)
 
+# Open Library's API policy asks every client to identify itself and provide a
+# way to be contacted; unidentified bulk traffic gets throttled and then
+# blocked outright at the connection level. This app sent the default
+# python-requests agent for its whole life, and a burst of heavy querying from
+# the production host was enough to earn a refusal (curl to openlibrary.org
+# returned instantly with no status from the server while working fine
+# elsewhere). Identifying the app is both the policy requirement and the thing
+# that makes a block appealable rather than mysterious.
+_USER_AGENT = (
+    "BookRecommender/1.0 (+https://iansbookrecs.com; kaufmanian49@gmail.com)"
+)
+_HEADERS = {"User-Agent": _USER_AGENT, "Accept": "application/json"}
+
+# Open Library gets a concurrency cap of its own. Google Books has had one
+# (_GB_SEMAPHORE, 3) since it was written; OL had none at all, despite being
+# the source that fetches 700-1000 records per query against Google's 40. Five
+# genre queries fire concurrently per request, and nothing bounded how many of
+# those could be in flight across simultaneous requests.
+_OL_SEMAPHORE = threading.Semaphore(3)
+
+# Statuses worth a second attempt: rate limiting and transient server faults.
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
 # In-memory response cache so repeated genre queries (litrpg, fantasy, ...) across
 # /search, /similar and /library/recommend don't re-hit the APIs within the TTL.
 # Bounded LRU + TTL: every distinct (url, params) is a fresh key, so an unbounded
@@ -114,11 +137,15 @@ def _get_json(url: str, params: dict | None, *,
         if semaphore is not None:
             semaphore.acquire()
         try:
-            resp = requests.get(url, params=params, timeout=_HTTP_TIMEOUT)
+            resp = requests.get(url, params=params, timeout=_HTTP_TIMEOUT,
+                                headers=_HEADERS)
         finally:
             if semaphore is not None:
                 semaphore.release()
-        if resp.status_code == 429 and attempt < retries:
+        # 429 is the polite refusal; 5xx is the provider stumbling. Both are
+        # worth one more try, and neither was retried before — a single 503
+        # discarded that query's entire candidate pool, up to 1000 books.
+        if resp.status_code in _RETRY_STATUSES and attempt < retries:
             retry_after = resp.headers.get("Retry-After")
             wait = float(retry_after) if (retry_after or "").isdigit() else 0.5 * (2 ** attempt)
             time.sleep(min(wait, 5.0))
@@ -186,7 +213,8 @@ class Fetcher:
         if not key.startswith("/"):
             key = "/" + key
         try:
-            data = _get_json(f"{OPENLIB_BASE}{key}.json", None)
+            data = _get_json(f"{OPENLIB_BASE}{key}.json", None,
+                             semaphore=_OL_SEMAPHORE, retries=1)
         except Exception:
             return "", []
 
@@ -295,7 +323,8 @@ class Fetcher:
         else:
             params = {"q": query, "limit": max_results, "offset": offset}
 
-        data = _get_json(OPENLIB_ENDPOINT, params)
+        data = _get_json(OPENLIB_ENDPOINT, params,
+                         semaphore=_OL_SEMAPHORE, retries=1)
         docs = data.get("docs", [])
         total = data.get("numFound", 0)
         return [self._from_openlib_doc(doc) for doc in docs], total
