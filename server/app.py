@@ -1343,7 +1343,7 @@ def _score_similar_candidates(
         if not source_has_text and not cand_genres:
             continue  # neither signal available on either side
         combined = _blend_genre_desc(
-            _genre_score(cand_genres, src_genres), desc_score,
+            _similar_genre_score(cand_genres, src_genres), desc_score,
             has_genres=bool(cand_genres and src_genres),
             source_has_text=source_has_text)
         if combined <= 0:
@@ -2075,10 +2075,74 @@ def _library_genre_profile(
 
 
 def _genre_score(cand_genres: set[str], profile: set[str]) -> float:
-    """Fraction of a candidate's genres that are in the library profile (0-1)."""
+    """Fraction of a candidate's genres that are in the library profile (0-1).
+
+    Used by /library/recommend. /similar uses _similar_genre_score instead —
+    see the note there on why dividing by the candidate's tag count misranks.
+    """
     if not cand_genres or not profile:
         return 0.0
     return len(cand_genres & profile) / len(cand_genres)
+
+
+# Atoms describing who a book is *for*, not what it is about. Catalogues file
+# these alongside genres, and treating them as genres is how a picture book
+# about a caterpillar ended up recommended for The Hobbit: the two share
+# "children's fiction" and nothing else. Audience is a real signal — a
+# children's source should prefer children's books — but it can't substitute
+# for genre, so it's scored separately and weighted low.
+_AUDIENCE_ATOMS = frozenset({
+    "children's fiction", "children's stories", "children's literature",
+    "juvenile fiction", "juvenile literature", "juvenile nonfiction",
+    "young adult fiction", "young adult", "picture books", "board books",
+    "middle grade", "readers", "children's poetry",
+})
+# How much of the genre signal audience agreement is allowed to account for.
+_W_AUDIENCE = 0.15
+
+
+def _real_genres(atoms: set[str]) -> set[str]:
+    """Recognised genres from a raw atom set — no audience, no subject facets.
+
+    Dropping unrecognised atoms is what keeps catalogue noise out of the
+    denominator below: The Hobbit's profile is ["children's fiction", "comic
+    books", "fantasy", "middle earth (imaginary place)", "strips"], of which
+    only "fantasy" describes the kind of book it is.
+    """
+    return {a for a in atoms if a in CORE_GENRES} - _AUDIENCE_ATOMS
+
+
+def _similar_genre_score(cand_atoms: set[str], profile_atoms: set[str]) -> float:
+    """Genre agreement between a candidate and the source, for /similar.
+
+    Measures how much of the *source's* genre identity the candidate covers,
+    rather than what fraction of the candidate's tags happen to match. The
+    latter is what /library/recommend's _genre_score does, and it inverts the
+    ranking: measured on The Hobbit, A Wizard of Earthsea scored 0.25 and The
+    Very Hungry Caterpillar 0.33 — both matched exactly one atom, and the
+    picture book won for having fewer tags to divide by. Better-catalogued
+    books were penalised for being better catalogued.
+
+    Falls back to the old measure when the source has no recognised genre at
+    all, so books the genre vocabulary doesn't cover degrade rather than
+    score zero across the board.
+    """
+    profile_genres = _real_genres(profile_atoms)
+    if not profile_genres:
+        return _genre_score(cand_atoms, profile_atoms)
+
+    # Full coverage is deliberately not required. Profiles carry noise —
+    # Mistborn's is ["adventure", "fantasy", "mystery", "science fiction"],
+    # two of which are wrong — so dividing by the whole profile makes a
+    # correct fantasy match score 0.25 and drops the book's top result from
+    # 45% to 21%. Two shared genres is already strong evidence, and demanding
+    # more punishes candidates for the source's bad tags.
+    matched = len(_real_genres(cand_atoms) & profile_genres)
+    coverage = min(matched / min(len(profile_genres), 2), 1.0)
+    shares_audience = bool(
+        (cand_atoms & _AUDIENCE_ATOMS) & (profile_atoms & _AUDIENCE_ATOMS)
+    )
+    return (1 - _W_AUDIENCE) * coverage + _W_AUDIENCE * float(shares_audience)
 
 
 # Heuristic fiction/nonfiction classification from genre tags. Single tokens

@@ -12,6 +12,8 @@ description only, blended with genre-atom overlap (description-weighted,
 W_GENRE/W_DESC = 0.4/0.6), popularity as a ≤5% multiplicative tiebreaker.
 """
 
+import pytest
+
 from server.app import _score_similar_candidates, _similar_genre_queries
 from server.models.book import Books
 
@@ -280,3 +282,96 @@ def test_a_shared_name_in_the_title_is_not_similarity():
     ranked = [b.id for b, _ in _score_similar_candidates(source, [dog_book, magic_book])]
     assert ranked and ranked[0] == "magic", "content must outrank a shared name"
     assert "dog" not in ranked, "a shared first name is not a reason to recommend"
+
+
+# ---------------------------------------------------------------------------
+# Genre agreement: coverage of the source, not fraction of the candidate
+#
+# Measured on The Hobbit before this change: A Wizard of Earthsea scored 0.25
+# on genre and The Very Hungry Caterpillar 0.33. Both matched exactly one atom;
+# the picture book won because it had fewer tags to divide by. The old measure
+# penalised books for being well catalogued, and treated "children's fiction"
+# — an audience, not a genre — as a reason two books are alike.
+# ---------------------------------------------------------------------------
+
+from server.app import _real_genres, _similar_genre_score  # noqa: E402
+
+HOBBIT_PROFILE = {"children's fiction", "comic books", "fantasy",
+                  "middle earth (imaginary place)", "strips"}
+
+
+def test_catalogue_noise_is_excluded_from_the_source_profile():
+    # Only "fantasy" describes what kind of book it is.
+    assert _real_genres(HOBBIT_PROFILE) == {"fantasy"}
+
+
+def test_audience_atoms_are_not_genres():
+    assert _real_genres({"children's fiction", "juvenile fiction"}) == set()
+    assert _real_genres({"fantasy", "children's fiction"}) == {"fantasy"}
+
+
+def test_a_genre_match_outranks_an_audience_match():
+    earthsea = {"fantasy", "magic", "magic in fiction"}
+    caterpillar = {"caterpillars", "children's fiction", "toy and movable books"}
+    assert _similar_genre_score(earthsea, HOBBIT_PROFILE) > \
+        _similar_genre_score(caterpillar, HOBBIT_PROFILE)
+
+
+def test_extra_tags_no_longer_penalise_a_candidate():
+    # The whole inversion: same genre match, more tags, used to score lower.
+    sparse = {"fantasy"}
+    rich = {"fantasy", "magic", "dragons", "quests", "wizards"}
+    assert _similar_genre_score(rich, HOBBIT_PROFILE) == \
+        _similar_genre_score(sparse, HOBBIT_PROFILE)
+
+
+def test_audience_still_counts_for_something():
+    # A children's fantasy should beat an adult fantasy for a children's
+    # source — just not beat it on audience alone.
+    childrens_fantasy = {"fantasy", "children's fiction"}
+    adult_fantasy = {"fantasy"}
+    assert _similar_genre_score(childrens_fantasy, HOBBIT_PROFILE) > \
+        _similar_genre_score(adult_fantasy, HOBBIT_PROFILE)
+    # ...but audience alone must not reach a genre match.
+    assert _similar_genre_score({"children's fiction"}, HOBBIT_PROFILE) < \
+        _similar_genre_score(adult_fantasy, HOBBIT_PROFILE)
+
+
+def test_partial_coverage_of_a_multi_genre_source():
+    profile = {"fantasy", "mystery"}
+    assert _similar_genre_score({"fantasy"}, profile) < \
+        _similar_genre_score({"fantasy", "mystery"}, profile)
+
+
+def test_falls_back_when_the_source_has_no_recognised_genre():
+    # Otherwise every candidate would score zero for books whose genre the
+    # vocabulary doesn't cover.
+    facets_only = {"severe poverty", "effects of war"}
+    assert _similar_genre_score({"severe poverty"}, facets_only) > 0
+
+
+def test_library_recommend_scoring_is_untouched():
+    # /similar is being trialled first; the library path must be unchanged.
+    from server.app import _genre_score
+    assert _genre_score({"fantasy", "magic", "dragons"}, {"fantasy"}) == 1 / 3
+
+
+def test_a_noisy_profile_does_not_punish_a_correct_match():
+    # Mistborn's profile is ["adventure", "fantasy", "mystery", "science
+    # fiction"], two of which are wrong. Demanding coverage of all four scored
+    # a correct fantasy match at 0.25 and cut the book's top result from 45%
+    # to 21%. Two shared genres counts as full agreement.
+    noisy = {"adventure", "fantasy", "mystery", "science fiction"}
+    assert _similar_genre_score({"fantasy"}, noisy) == \
+        pytest.approx(_similar_genre_score({"fantasy"}, {"fantasy", "mystery"}))
+
+
+def test_matching_two_genres_still_beats_matching_one():
+    profile = {"fantasy", "mystery", "romance"}
+    assert _similar_genre_score({"fantasy", "mystery"}, profile) > \
+        _similar_genre_score({"fantasy"}, profile)
+
+
+def test_coverage_never_exceeds_one():
+    profile = {"fantasy", "mystery", "romance", "horror"}
+    assert _similar_genre_score(profile, profile) <= 1.0
