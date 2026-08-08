@@ -514,6 +514,12 @@ MIN_SIMILAR_SCORE = 0.15
 # one book and nothing measurable on the others, because the time goes on
 # round-trips rather than payload. The offline page generator has no latency
 # budget to protect, so it reaches further still.
+# Google Books pages to pull when Open Library returns nothing for a query.
+# Google caps one response at 40 records, so a single page can't stand in for
+# Open Library's 700-1000. Five pages rebuilds a workable pool without pulling
+# them on every healthy request, where they'd be wasted quota.
+_GB_FALLBACK_PAGES = 5
+
 SIMILAR_OL_BATCH = 700
 SEO_OL_BATCH = 1000
 
@@ -2628,18 +2634,41 @@ def _fetch_genre_candidates(query: str, ol_batch: int = 200) -> list[Books]:
     an empty list. Shared by /library/recommend (default batch) and /similar
     (SIMILAR_OL_BATCH)."""
     out: list[Books] = []
+    gb = Fetcher(source=GOOGLE_ENDPOINT)
     try:
-        gb_books, _ = Fetcher(source=GOOGLE_ENDPOINT).fetch_google_page(
-            query, max_results=40, category="genre")
+        gb_books, _ = gb.fetch_google_page(query, max_results=40, category="genre")
         out.extend(gb_books)
     except Exception:
         logger.warning("Google Books genre fetch failed for query %r.", query, exc_info=True)
+
+    ol_books: list[Books] = []
     try:
         ol_books, _ = Fetcher(source=OPENLIB_ENDPOINT).fetch_page(
             query, batch_size=ol_batch, category="genre")
         out.extend(ol_books)
     except Exception:
         logger.warning("Open Library genre fetch failed for query %r.", query, exc_info=True)
+
+    # Open Library carries the pool — 700-1000 records per query against
+    # Google's 40 — so when it returns nothing the candidate set is far too
+    # thin to clear the score floor, and Find Similar answers "no similar
+    # books found". That is not hypothetical: openlibrary.org blocked this
+    # server's IP outright and the feature went dark while Google was healthy
+    # the whole time. Google caps a single response at 40 but paginates, so
+    # page deeper to rebuild a usable pool rather than degrade to nothing.
+    if not ol_books:
+        for page in range(1, _GB_FALLBACK_PAGES):
+            try:
+                more, _ = gb.fetch_google_page(
+                    query, max_results=40, category="genre",
+                    start_index=page * 40)
+            except Exception:
+                logger.warning("Google Books fallback page %d failed for %r.",
+                               page, query, exc_info=True)
+                break
+            if not more:
+                break
+            out.extend(more)
     return out
 
 
