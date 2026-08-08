@@ -329,3 +329,38 @@ def test_inference_adds_the_genre_a_catalogue_shelf_omits():
         "is a wizard and attends a school of witchcraft, studying spells and "
         "magic. Children's stories Juvenile fiction"
     ) == "Fantasy"
+
+
+# ------------------------------------- audience-only sources must not fall back
+# Production: searching "Harry potter" returns a record whose only atom is
+# "children's stories". _real_genres correctly rejects that as an audience
+# marker — but the legacy fallback then scored it *as* a genre, handing the
+# whole list back to Enid Blyton, who owns that subject in Open Library. The
+# safety net reintroduced the bug it was meant to catch.
+
+def test_audience_only_source_scores_no_genre_agreement():
+    from server.app import _similar_genre_score
+
+    audience_only = {"children's stories"}
+    blyton = {"children's adventure stories", "children's stories"}
+    assert _similar_genre_score(blyton, audience_only) == 0.0
+
+
+def test_a_genuinely_unrecognised_source_still_falls_back():
+    # The fallback is still wanted for genres the vocabulary doesn't know —
+    # it just must not treat an audience marker as one of them.
+    from server.app import _similar_genre_score
+
+    unknown = {"bildungsromans", "sea stories"}
+    assert _similar_genre_score({"sea stories"}, unknown) > 0
+
+
+def test_a_tagged_but_genreless_source_counts_as_sparse():
+    # The enrichment trigger keyed on "no tags or short description", so a
+    # record with one useless tag and a real blurb skipped enrichment entirely
+    # while a sibling record for the same book was tagged Fantasy.
+    from server.app import _genre_atoms, _real_genres
+
+    genreless = ["Children's stories, English"]
+    assert not _real_genres(set(_genre_atoms(genreless)[0]))
+    assert _real_genres(set(_genre_atoms(["Fantasy"])[0])) == {"fantasy"}

@@ -591,8 +591,16 @@ def _enrich_source_by_title_lookup(source: Books) -> None:
         if best_tags and len(best_desc) >= 60:
             break  # rich enough, skip the second provider
 
-    if best_tags and not source.tags:
-        source.tags = best_tags
+    # Borrow tags when the source has none *or* when the ones it has name no
+    # genre. Searching "Harry potter" returns one record tagged only
+    # "Children's stories, English" and two more tagged "Fantasy" — the same
+    # book. The first looked healthy enough to skip enrichment (it had a tag
+    # and a 217-character blurb) and produced a single Enid Blyton
+    # recommendation, while its siblings produced Narnia and Lloyd Alexander.
+    # A tag that isn't a genre is not a reason to stop looking for one.
+    if best_tags and (not source.tags
+                      or not _real_genres(set(_genre_atoms(source.tags)[0]))):
+        source.tags = best_tags + [t for t in source.tags if t not in best_tags]
     if len(best_desc) > len(source.description):
         source.description = best_desc
 
@@ -625,7 +633,15 @@ def _gather_similar_candidates(
             logger.warning("Source enrichment failed for %r.", req.title, exc_info=True)
     # Still sparse (webnovels, fan prints — no enrichable work id)? Find the
     # same book in either provider by title and borrow its tags/description.
-    if not source_book.tags or len(source_book.description) < 60:
+    #
+    # "Sparse" has to include *tagged but genreless*, not just empty. A record
+    # carrying only "Children's stories, English" and a 217-character blurb
+    # passes both checks below while being unusable: nothing in it says what
+    # kind of book it is, and a sibling record for the same title says
+    # "Fantasy". Skipping enrichment there is what left Find Similar on Harry
+    # Potter returning a single Enid Blyton title.
+    if (not source_book.tags or len(source_book.description) < 60
+            or not _real_genres(set(_genre_atoms(source_book.tags)[0]))):
         try:
             _enrich_source_by_title_lookup(source_book)
         except Exception:
@@ -2150,6 +2166,13 @@ def _similar_genre_score(cand_atoms: set[str], profile_atoms: set[str]) -> float
     """
     profile_genres = _real_genres(profile_atoms)
     if not profile_genres:
+        # Fall back to the old measure only when there's nothing recognisable
+        # at all. If the source's atoms are *audience* atoms, falling back
+        # scores "children's stories" as though it were a genre — which is the
+        # exact failure this function exists to fix, and it put Enid Blyton
+        # back at the top of Harry Potter's list through the back door.
+        if profile_atoms & _AUDIENCE_ATOMS:
+            return 0.0
         return _genre_score(cand_atoms, profile_atoms)
 
     # Full coverage is deliberately not required. Profiles carry noise —
