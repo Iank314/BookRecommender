@@ -669,6 +669,25 @@ def _gather_similar_candidates(
         # genuinely share them.
         if derived:
             source_book.tags = [derived] + list(source_book.tags)
+    else:
+        # The source named at least one genre — but catalogues describe a book
+        # by shelf, not by content, and a shelf is often only half the story.
+        # Harry Potter resolves to "children's stories" / "juvenile fiction"
+        # with no fantasy atom anywhere, so every query asked for children's
+        # adventure and the results were six Enid Blyton titles: correctly
+        # matched to the tags, and nothing a reader wanted.
+        #
+        # So infer a genre from the story vocabulary and add it *alongside* the
+        # catalogued ones, rather than only as a rescue when there are none.
+        # Wizards and witchcraft in the blurb put fantasy in the pool without
+        # dropping the children's-fiction dimension that's also true.
+        inferred = _infer_genre_from_content(
+            f"{source_book.title} {source_book.description} "
+            f"{' '.join(source_book.tags)}"
+        )
+        if inferred and inferred.lower() not in {q.lower() for q in genre_queries}:
+            genre_queries.append(inferred)
+            source_book.tags = [inferred] + list(source_book.tags)
 
     # Up to 5 atom queries — slash-splitting often produces more useful atoms.
     genre_queries = genre_queries[:5]
@@ -726,11 +745,20 @@ def _gather_similar_candidates(
     if _fiction_signal(source_book) > 0:
         all_books = [c for c in all_books if _fiction_signal(c) >= 0]
 
+    # Never recommend the source back to itself. The dedup key above includes
+    # the author string, so a reissue credited "J.R.R. Tolkien" instead of
+    # "J. R. R. Tolkien" hashes differently and survives — which is why Find
+    # Similar on The Hobbit listed The Hobbit. Titles alone are the reliable
+    # check here; the source is one specific book, not a series.
+    source_title = _norm_title(req.title)
+    all_books = [c for c in all_books if _norm_title(c.title) != source_title]
+
     return source_book, src_lang, all_books
 
 
 def _cap_by_author(
-    ranked: list[tuple[Books, float]], cap: int, top_n: int
+    ranked: list[tuple[Books, float]], cap: int, top_n: int,
+    exempt: set[str] | None = None,
 ) -> list[tuple[Books, float]]:
     """Keep at most `cap` books per author. Applied before the top-N slice,
     otherwise capping would just shorten the list instead of promoting others.
@@ -741,11 +769,17 @@ def _cap_by_author(
     comes straight back and the page is a bibliography again. A shorter, varied
     list is the better page; the publish gate enforces a floor on the length.
     """
+    exempt = exempt or set()
     author_counts: dict[str, int] = defaultdict(int)
     chosen: list[tuple[Books, float]] = []
     for cand, score in ranked:
         author = _norm_title(cand.authors[0]) if cand.authors else ""
-        if author and author_counts[author] >= cap:
+        # The source's own author is exempt: someone who clicks Find Similar on
+        # Mistborn often does want more Sanderson. Everyone else is capped —
+        # Find Similar on Harry Potter returned six Enid Blyton titles, because
+        # one prolific author owns Open Library's children's-adventure subject.
+        capped = author and author not in exempt and author_counts[author] >= cap
+        if capped:
             continue
         chosen.append((cand, score))
         if author:
@@ -792,9 +826,11 @@ def _similar_core(
     # --- 5) Collapse each series to its earliest-volume entry ---
     collapsed = _collapse_series_picks([(cand, score, None) for cand, score in scored])
     ranked = [(book, score) for book, score, _ in collapsed]
-    top = (
-        _cap_by_author(ranked, author_cap, req.top_n)
-        if author_cap else ranked[: req.top_n]
+    # The source's author is exempt from the cap — see _cap_by_author.
+    source_authors = {_norm_title(a) for a in req.authors if a}
+    top = _cap_by_author(
+        ranked, author_cap if author_cap is not None else SIMILAR_AUTHOR_CAP,
+        req.top_n, exempt=source_authors,
     )
 
     # --- 6) Swap any later-volume entry for its book 1 ---
@@ -1080,6 +1116,12 @@ def _join_prose(items: list[str]) -> str:
 # At most this many books by one author on a public page. Two lets a genuine
 # "the rest of this author's work is also for you" signal through without the
 # list becoming a bibliography.
+# Books by any one author (other than the source's own) on a /similar list.
+# Without this, a single prolific author can own a whole subject in Open
+# Library and take the entire list: Find Similar on Harry Potter returned six
+# Enid Blyton titles, all correctly matched to "children's adventure stories".
+SIMILAR_AUTHOR_CAP = 2
+
 SEO_AUTHOR_CAP = 2
 
 # Relevance floor for public pages, well above the app's MIN_SIMILAR_SCORE.

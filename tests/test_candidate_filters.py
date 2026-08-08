@@ -274,3 +274,58 @@ def test_childrens_stories_is_recognised_as_a_genre():
     assert "children's stories" in CORE_GENRES
     assert _similar_genre_queries(["Children's stories"], set(), set()) \
         == ["Children's stories"]
+
+
+# ------------------------------------------------------------- author caps
+# Production: Find Similar on Harry Potter returned six Enid Blyton titles.
+# Every one matched the source's "children's adventure stories" tag correctly;
+# the list was still useless, because one prolific author owns that subject in
+# Open Library. The cap existed but was wired only to the page generator.
+
+def _authored(book_id, author):
+    return Books(id=book_id, title=f"Book {book_id}", authors=[author],
+                 description="d", tags=[], metadata={})
+
+
+def test_one_author_cannot_take_the_whole_list():
+    from server.app import SIMILAR_AUTHOR_CAP, _cap_by_author
+
+    ranked = [(_authored(str(i), "Enid Blyton"), 0.5) for i in range(6)]
+    ranked += [(_authored("x", "Diana Wynne Jones"), 0.4),
+               (_authored("y", "Eva Ibbotson"), 0.3)]
+    kept = _cap_by_author(ranked, SIMILAR_AUTHOR_CAP, top_n=20)
+    blyton = [b for b, _ in kept if b.authors == ["Enid Blyton"]]
+    assert len(blyton) == SIMILAR_AUTHOR_CAP
+    assert {b.authors[0] for b, _ in kept} == {
+        "Enid Blyton", "Diana Wynne Jones", "Eva Ibbotson"}
+
+
+def test_the_sources_own_author_is_exempt_from_the_cap():
+    # Clicking Find Similar on Mistborn and getting more Sanderson is the
+    # feature working, not the bug — only *other* authors get capped.
+    from server.app import _cap_by_author, _norm_title
+
+    ranked = [(_authored(str(i), "Brandon Sanderson"), 0.5) for i in range(5)]
+    kept = _cap_by_author(ranked, 2, top_n=20,
+                          exempt={_norm_title("Brandon Sanderson")})
+    assert len(kept) == 5
+
+
+def test_cap_does_not_backfill_with_the_author_it_just_capped():
+    # Backfilling to reach top_n undoes the cap entirely when the pool is
+    # dominated by one author, which is exactly when it's needed.
+    from server.app import _cap_by_author
+
+    ranked = [(_authored(str(i), "Enid Blyton"), 0.5) for i in range(10)]
+    assert len(_cap_by_author(ranked, 2, top_n=20)) == 2
+
+
+def test_inference_adds_the_genre_a_catalogue_shelf_omits():
+    # Harry Potter's record carries children's/juvenile tags and no fantasy
+    # atom, so the pool was children's adventure only. The blurb says wizard
+    # and witchcraft; inference is what puts fantasy back in the queries.
+    assert _infer_genre_from_content(
+        "Harry Potter and the Sorcerer's Stone An orphaned boy discovers he "
+        "is a wizard and attends a school of witchcraft, studying spells and "
+        "magic. Children's stories Juvenile fiction"
+    ) == "Fantasy"
