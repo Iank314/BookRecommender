@@ -364,3 +364,33 @@ def test_a_tagged_but_genreless_source_counts_as_sparse():
     genreless = ["Children's stories, English"]
     assert not _real_genres(set(_genre_atoms(genreless)[0]))
     assert _real_genres(set(_genre_atoms(["Fantasy"])[0])) == {"fantasy"}
+
+
+# ------------------------------------------- borrowing a genre from a sibling
+# Open Library lists the same book twice: a "Harry Potter" record tagged only
+# "Children's stories" and a "Harry Potter and the Sorcerer's Stone" record
+# tagged "Fantasy". Enrichment compared series keys for equality, so the
+# genreless record could never borrow from its own sibling, and Find Similar
+# on it returned nothing at all.
+
+def test_a_short_title_matches_its_full_titled_sibling():
+    from server.app import _names_same_work
+
+    assert _names_same_work("harry potter and the sorcerers stone", "harry potter")
+    assert _names_same_work("harry potter", "harry potter")
+
+
+def test_prefix_matching_needs_a_distinctive_title():
+    from server.app import _names_same_work
+
+    # "It" or "Dune" would otherwise prefix-match half the catalogue.
+    assert not _names_same_work("it ends with us", "it")
+    assert not _names_same_work("dune messiah", "dune")
+
+
+def test_a_prefix_must_land_on_a_word_boundary():
+    from server.app import _names_same_work
+
+    # "the hobbits" is a different work from "the hobbit".
+    assert not _names_same_work("the hobbits of the shire", "the hobbit")
+    assert _names_same_work("the hobbit there and back again", "the hobbit")

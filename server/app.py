@@ -560,6 +560,25 @@ def _squash_author(name: str) -> str:
     return re.sub(r"[^a-z]", "", name.lower())
 
 
+def _names_same_work(cand_key: str, src_key: str) -> bool:
+    """Whether a candidate title plausibly names the same work as the source.
+
+    Catalogues list the same book under both a short and a full title: Open
+    Library has a "Harry Potter" record tagged only "Children's stories" and a
+    "Harry Potter and the Sorcerer's Stone" record tagged "Fantasy". Requiring
+    the series keys to match exactly meant the genreless record could never
+    borrow from its own sibling, and Find Similar returned nothing for it.
+
+    A word-boundary prefix is enough, but only for a distinctive source title —
+    a short one like "It" or "Dune" would prefix-match half the catalogue.
+    """
+    if cand_key == src_key:
+        return True
+    if len(src_key) < 8:
+        return False
+    return cand_key.startswith(src_key + " ")
+
+
 def _enrich_source_by_title_lookup(source: Books) -> None:
     """Last-resort source enrichment: find the same book in either provider by
     title and borrow the richest record's tags + description. Saves sparse
@@ -577,6 +596,7 @@ def _enrich_source_by_title_lookup(source: Books) -> None:
             source.title, batch_size=40, category="title")[0]
 
     best_tags: list[str] = []
+    best_tags_have_genre = False
     best_desc = ""
     for fetch in (_gb, _ol):
         try:
@@ -584,7 +604,7 @@ def _enrich_source_by_title_lookup(source: Books) -> None:
         except Exception:
             continue
         for cand in results:
-            if _split_series(cand.title)[0] != skey:
+            if not _names_same_work(_split_series(cand.title)[0], skey):
                 continue
             if src_authors:
                 cand_authors = {_squash_author(a) for a in cand.authors if a}
@@ -592,9 +612,16 @@ def _enrich_source_by_title_lookup(source: Books) -> None:
                     continue  # same title, different book
             if len(cand.description) > len(best_desc):
                 best_desc = cand.description
-            if cand.tags and not best_tags:
-                best_tags = cand.tags
-        if best_tags and len(best_desc) >= 60:
+            # Prefer a sibling that names an actual genre. Taking the first
+            # tagged record found borrowed "Children's stories" from another
+            # audience-only edition and left the source no better off.
+            if cand.tags:
+                cand_has_genre = bool(_real_genres(set(_genre_atoms(cand.tags)[0])))
+                if cand_has_genre and not best_tags_have_genre:
+                    best_tags, best_tags_have_genre = cand.tags, True
+                elif not best_tags:
+                    best_tags = cand.tags
+        if best_tags_have_genre and len(best_desc) >= 60:
             break  # rich enough, skip the second provider
 
     # Borrow tags when the source has none *or* when the ones it has name no

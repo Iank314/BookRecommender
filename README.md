@@ -26,12 +26,11 @@ The app currently searches **Google Books + Open Library** (see [fetcher.py](ser
 
 - **Set `GOOGLE_BOOKS_API_KEY` first (free, zero code, biggest win).** Unauthenticated, the fetcher caps Google at 3 concurrent requests and trips a 60s cooldown the moment Google 429s — which happens constantly, so Open Library carries most of every search. A free key (Google Cloud Console → enable the Books API) removes that ceiling and is what was starving the webnovel lookups (e.g. Shadow Slave). Do this and measure before adding any new source — more sources just multiply dedup work and latency for marginal recall if Google is still throttled.
 - **ISBNdb (paid, ~$15–50/mo) — best single upgrade if budget allows.** Highest-quality metadata and ISBN coverage of any option. Clean REST API. Won't help web serials specifically (see the gap note below).
-- **Hardcover (free, GraphQL) — modern/popular titles, Goodreads-like.** Requires a free account token; verify current API access/terms before building (it was early-stage as of early 2026).
+- **Hardcover (free, GraphQL) — modern/popular titles from a community-maintained catalog.** Requires a free account token; verify current API access/terms before building (it was early-stage as of early 2026).
 - **NYT Books API (free) — a popularity *signal*, not a search backend.** Bestseller lists only; useful to strengthen the popularity tiebreaker in scoring, not to widen raw search recall.
 - **Penguin Random House (free key) — high-quality but narrow** (their catalog only).
 
 **Dead ends — don't sink time here:**
-- **Goodreads:** API discontinued for new developers in **December 2020**; existing keys stopped working too. There is no supported Goodreads API. (The app uses *Google Books*, not Goodreads — don't confuse the two.)
 - **Amazon / Kindle:** the Product Advertising API (PA-API 5.0) requires an Amazon Associates account *with qualifying sales* to keep access, is hard rate-limited (~1 req/sec), and its ToS **prohibits caching results or building a competing catalog** — exactly what this app does. Not viable.
 
 **Structural gap to set expectations:** webnovels and light novels (Shadow Slave, most Royal Road / xianxia serials) have **no metadata in any mainstream book API** until a print/Kindle edition gets cataloged — which Google Books *does* eventually pick up (another reason for the key). ISBNdb won't fix this either; it's a data-availability limit, not an integration one. The `MIN_SIMILAR_SCORE` floor already makes these cases return an honest empty result instead of one wrong book.
