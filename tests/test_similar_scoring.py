@@ -228,3 +228,55 @@ def test_token_threshold_separates_boilerplate_from_a_real_blurb():
 
     assert len(_text_tokens(BOILERPLATE_SOURCE)) < _MIN_SOURCE_TEXT_TOKENS
     assert len(_text_tokens(SOURCE)) > _MIN_SOURCE_TEXT_TOKENS
+
+
+# ---------------------------------------------------------------------------
+# Similarity is about content, not titles
+#
+# Production regression: Find Similar on "Harry Potter" returned "Harry the
+# Dirty Dog" and "Harry by the Sea" — children's books about a dog, matched
+# purely on a shared first name. Titles are mostly proper nouns, and rare ones
+# at that, so IDF weighted them heavily. A recommendation has to come from what
+# a book is about.
+# ---------------------------------------------------------------------------
+
+from server.app import _content_tokens  # noqa: E402
+
+
+def test_content_tokens_ignore_the_title():
+    book = _bk("x", "Harry Potter and the Sorcerer's Stone",
+               description="A young wizard attends a school of magic.")
+    tokens = _content_tokens(book)
+    assert "potter" not in tokens
+    assert "harry" not in tokens
+    assert {"wizard", "school", "magic"} <= tokens
+
+
+def test_content_tokens_fall_back_to_the_title_when_there_is_no_blurb():
+    # Some signal beats none; _has_recommendable_content drops most of these
+    # before scoring anyway.
+    assert "dragon" in _content_tokens(_bk("y", "Dragons of Autumn Twilight"))  # folded
+
+
+def test_a_shared_name_in_the_title_is_not_similarity():
+    source = _bk(
+        "src", "Harry Potter and the Sorcerer's Stone",
+        description="An orphaned boy discovers he is a wizard and attends "
+                    "a school of witchcraft, where he studies spells and magic.",
+        tags=["Juvenile Fiction"],
+    )
+    dog_book = _bk(
+        "dog", "Harry the Dirty Dog",
+        description="A white dog with black spots runs away from home and "
+                    "gets so dirty his family does not recognise him.",
+        tags=["Juvenile Fiction"],
+    )
+    magic_book = _bk(
+        "magic", "The Worst Witch",
+        description="A clumsy young witch attends a school of witchcraft, "
+                    "struggling with her spells and magic lessons.",
+        tags=["Juvenile Fiction"],
+    )
+    ranked = [b.id for b, _ in _score_similar_candidates(source, [dog_book, magic_book])]
+    assert ranked and ranked[0] == "magic", "content must outrank a shared name"
+    assert "dog" not in ranked, "a shared first name is not a reason to recommend"

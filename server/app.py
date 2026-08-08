@@ -496,11 +496,17 @@ MIN_SIMILAR_SCORE = 0.05
 SIMILAR_OL_BATCH = 700
 SEO_OL_BATCH = 1000
 
-# Below this many folded tokens, a source's "description" is title words plus
-# provider boilerplate rather than a blurb, and ranking candidates by overlap
-# with it is noise. Measured: Harry Potter's enriched record yields 5 tokens,
-# The Fellowship of the Ring 78, Mistborn 115 — real blurbs clear it easily.
-_MIN_SOURCE_TEXT_TOKENS = 12
+# Below this many folded tokens, a source's description is provider boilerplate
+# rather than a blurb ("First published in 2000. | By ..."), and ranking
+# candidates by overlap with it is noise.
+#
+# Counted over _content_tokens, i.e. the description alone. The value was 12
+# when titles were included and contributed 3-5 tokens of their own; keeping it
+# there after titles were dropped would have quietly raised the bar, sending
+# genuinely-described books down the genre-only path. A one-line blurb like
+# "A young wizard attends a school of magic" is thin but real signal, and
+# should be scored as text.
+_MIN_SOURCE_TEXT_TOKENS = 8
 
 # /similar is anonymous and re-runs the whole fetch+score pipeline per click,
 # so identical clicks within the TTL window are served from memory. Keyed on
@@ -640,7 +646,20 @@ def _gather_similar_candidates(
                 f"{source_book.title} {source_book.description} "
                 f"{' '.join(source_book.tags)}"
             )
-        genre_queries = [derived.lower()] if derived else ["fiction"]
+        if derived:
+            genre_queries = [derived.lower()]
+        else:
+            # Last resort before "fiction": the book's own subject atoms,
+            # facets included. They make poor queries, but a pool built from
+            # "children's stories" still beats one built from "fiction", which
+            # returns assorted classics. Never returning [] here is the point:
+            # a genre the whitelist hasn't heard of must degrade the pool, not
+            # empty it. Searching "Harry potter" in production returns a record
+            # tagged "children's stories" — not on the whitelist — and Find
+            # Similar returned nothing at all for the site's most popular query.
+            genre_queries = _similar_genre_queries(
+                source_book.tags, title_words, author_words, allow_facets=True
+            ) or ["fiction"]
         # Give the scorer the same genre the pool was fetched with. Without
         # this the source's profile stays pure facets ("Wizards, fiction",
         # "Magic, fiction" for Harry Potter) which overlap nothing in a
@@ -865,15 +884,10 @@ def _fold_token(tok: str) -> str:
     return tok
 
 
-def _text_tokens(book: Books) -> set[str]:
-    """Folded token set from title + description only — genre tags excluded.
-
-    Used for the description-similarity signal, kept separate from the genre
-    signal so genre words don't get counted twice.
-    """
-    text = f"{book.title} {book.description}".lower()
+def _tokenize(text: str) -> set[str]:
+    """Folded, stopword-filtered token set from arbitrary text."""
     out: set[str] = set()
-    for tok in re.findall(r"[a-z]+", text):
+    for tok in re.findall(r"[a-z]+", text.lower()):
         if len(tok) <= 2 or tok in _SIM_STOPWORDS:
             continue
         folded = _fold_token(tok)
@@ -883,7 +897,35 @@ def _text_tokens(book: Books) -> set[str]:
     return out
 
 
-def _compute_token_idf(books: list[Books], token_fn=_text_tokens) -> dict[str, float]:
+def _text_tokens(book: Books) -> set[str]:
+    """Folded token set from title + description — genre tags excluded.
+
+    Used for the description-similarity signal, kept separate from the genre
+    signal so genre words don't get counted twice. Prefer _content_tokens for
+    judging similarity; this stays for corpus statistics and enrichment
+    ranking, where a title is legitimately part of a book's text.
+    """
+    return _tokenize(f"{book.title} {book.description}")
+
+
+def _content_tokens(book: Books) -> set[str]:
+    """Tokens describing what a book is *about* — description, not title.
+
+    Titles are mostly proper nouns, and matching on them produces nonsense that
+    looks like a bug to anyone reading it: "Harry Potter" scored against "Harry
+    the Dirty Dog" and "Harry by the Sea" purely on a shared first name, and
+    those are rare tokens so IDF weighted them heavily. A recommendation should
+    come from what the book is about, not what it's called.
+
+    Falls back to the title when there's no description, since some signal
+    beats none — but _has_recommendable_content already drops candidates with
+    no blurb, so that path is rare on the candidate side.
+    """
+    tokens = _tokenize(book.description)
+    return tokens or _tokenize(book.title)
+
+
+def _compute_token_idf(books: list[Books], token_fn=_content_tokens) -> dict[str, float]:
     """IDF for every token across the candidate corpus."""
     df: dict[str, int] = {}
     for book in books:
@@ -986,7 +1028,7 @@ def _reason_tokens(
         identity |= {_fold_token(t) for t in re.findall(r"[a-z]+", text.lower())}
 
     shared = [
-        tok for tok in src_text & _text_tokens(candidate)
+        tok for tok in src_text & _content_tokens(candidate)
         if tok not in identity and tok not in _REASON_STOPWORDS
     ]
     # IDF still orders them — it's a fine "which of these is more distinctive"
@@ -1063,7 +1105,7 @@ def similar_page_data(req: SimilarRequest) -> tuple[dict | None, list[dict]]:
 
     idf = _compute_token_idf(candidates)
     default_idf = math.log(len(candidates) + 1) + 1
-    src_text = _text_tokens(source_book)
+    src_text = _content_tokens(source_book)
     src_genres = set(_genre_atoms(source_book.tags)[0])
 
     results = []
@@ -1229,7 +1271,7 @@ def _score_similar_candidates(
     sharing only genre-tag strings scored as if its text matched, and
     popular-but-irrelevant books nearly doubled their score at the low end.
     """
-    src_text = _text_tokens(source)
+    src_text = _content_tokens(source)
     src_genres = set(_genre_atoms(source.tags)[0])
     if not src_text and not src_genres:
         return []
@@ -1248,7 +1290,7 @@ def _score_similar_candidates(
     for cand in candidates:
         if not _has_recommendable_content(cand):
             continue  # no description — genre alone is too weak to recommend on
-        cand_text = _text_tokens(cand)
+        cand_text = _content_tokens(cand)
         desc_score = _idf_weighted_f1(src_text, cand_text, idf, default_idf)
         # When the source has a real description, a candidate must share some
         # of it — genre overlap alone can't rank it (every candidate was
@@ -1900,6 +1942,7 @@ def _genre_atoms(tags: list[str]) -> tuple[list[str], list[str]]:
 
 def _similar_genre_queries(
     tags: list[str], title_words: set[str], author_words: set[str],
+    allow_facets: bool = False,
 ) -> list[str]:
     """Build /similar's genre subject-search queries from the source's tags.
 
@@ -1936,23 +1979,30 @@ def _similar_genre_queries(
             else:
                 specific.append(atom)
 
-    # Keep only atoms that name an actual genre. Open Library's subject tags
-    # are catalogue facets as often as genres, and a facet makes a
-    # catastrophic subject-search query: The Hunger Games resolves to
-    # ["effects of war", "oppression", "self-sacrifice", "severe poverty"],
-    # which fetched a pool of famine studies that no amount of scoring could
-    # rescue.
+    # Prefer atoms that name an actual genre. Open Library's subject tags are
+    # catalogue facets as often as genres, and a facet makes a catastrophic
+    # subject-search query: The Hunger Games resolves to ["effects of war",
+    # "oppression", "self-sacrifice", "severe poverty"], which fetched a pool
+    # of famine studies that no amount of scoring could rescue.
     #
-    # Returning [] rather than falling back to the generic atoms is
-    # deliberate. "Fiction" as a subject search returns mostly random
-    # classics, whereas [] hands the caller to _derive_genre_from_text, which
-    # reads the title and blurb — that's how Harry Potter, whose only atoms
-    # are "magic" and two proper nouns, still gets a fantasy candidate pool.
-    # The caller falls back to "fiction" itself if derivation finds nothing.
-    return [
+    # But this is a *preference*, never a loss of recall. An earlier version
+    # returned only whitelisted atoms, which made CORE_GENRES a hard gate on
+    # the live path — and CORE_GENRES was curated from a fantasy-heavy sample,
+    # so anything it missed silently broke that book. In production, searching
+    # "Harry potter" returns a record tagged "children's stories"; the list
+    # isn't on the whitelist, the queries came back empty, and Find Similar
+    # returned nothing at all for the site's most popular search.
+    #
+    # So: real genres first, and if there are none, the caller tries deriving
+    # one from the text before falling back to whatever specific atoms exist.
+    # Returning them separately lets the caller order those attempts.
+    core = [
         atom for atom in specific
         if _GENRE_SYNONYMS.get(atom.lower(), atom.lower()) in CORE_GENRES
     ]
+    if core:
+        return core
+    return (specific or generic) if allow_facets else []
 
 
 def _library_genre_profile(
@@ -2587,11 +2637,11 @@ def library_recommend(
     # so a tagless book is judged purely on how its description reads, while a
     # tagged book in none of the library's genres is dragged down by a near-zero
     # genre_score. Popularity stays a multiplicative tiebreaker.
-    saved_text = [t for t in (_text_tokens(b) for b in saved) if t]
+    saved_text = [t for t in (_content_tokens(b) for b in saved) if t]
     if not saved_text:
         return []
 
-    idf = _compute_token_idf(candidates, token_fn=_text_tokens)
+    idf = _compute_token_idf(candidates, token_fn=_content_tokens)
     default_idf = math.log(len(candidates) + 1) + 1
     # When the library is fiction, drop candidates whose genres read as
     # nonfiction (how-tos, histories) — they otherwise match on shared theme
@@ -2601,8 +2651,8 @@ def library_recommend(
     # Feedback signals (see _feedback_modifier): thumbs-up/down re-weight each
     # candidate by description similarity to the nearest liked/disliked book
     # AND by whether it shares an author with a disliked book.
-    liked_text = [t for t in (_text_tokens(b) for b in liked_books) if t]
-    disliked_text = [t for t in (_text_tokens(b) for b in disliked_books) if t]
+    liked_text = [t for t in (_content_tokens(b) for b in liked_books) if t]
+    disliked_text = [t for t in (_content_tokens(b) for b in disliked_books) if t]
     liked_authors = _feedback_authors(liked_books)
     disliked_authors = _net_disliked_authors(liked_books, disliked_books)
     has_feedback = bool(liked_text or disliked_text or liked_authors or disliked_authors)
@@ -2614,7 +2664,7 @@ def library_recommend(
             continue  # no description — genre alone is too weak to recommend on
         if drop_nonfiction and _fiction_signal(cand) < 0:
             continue
-        cand_text = _text_tokens(cand)
+        cand_text = _content_tokens(cand)
         if not cand_text:
             continue
         best_idx, desc_score = 0, 0.0

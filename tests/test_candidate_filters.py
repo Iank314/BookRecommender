@@ -239,3 +239,38 @@ def test_batch_size_is_threaded_through_to_the_fetch():
 
     for fn in (_gather_similar_candidates, _similar_core):
         assert inspect.signature(fn).parameters["ol_batch"].default == SIMILAR_OL_BATCH
+
+
+# ---------------------------------------- the whitelist must never empty a pool
+# Production regression: CORE_GENRES was curated from a fantasy-heavy sample and
+# then used as a hard gate on the live query path. Searching "Harry potter"
+# returns a record tagged "children's stories" — a real genre the whitelist
+# happened to omit — so the query list came back empty, the pool fell back to a
+# generic "fiction" search, and Find Similar returned nothing for the site's
+# most popular query. The whitelist is a preference now, not a gate.
+
+def test_unrecognised_genres_still_produce_a_query_when_facets_are_allowed():
+    for tag in ["Children's stories", "Some Genre Nobody Whitelisted",
+                "Sea stories", "Bildungsromans"]:
+        assert _similar_genre_queries([tag], set(), set(), allow_facets=True), tag
+
+
+def test_whitelisted_genres_still_win_over_facets():
+    # Ordering is the whole point: a real genre must be preferred, and only
+    # when there is none do the facets get used.
+    assert _similar_genre_queries(
+        ["Severe poverty", "Epic Fantasy"], set(), set(), allow_facets=True,
+    ) == ["Epic Fantasy"]
+
+
+def test_facets_are_still_withheld_by_default():
+    # The caller tries deriving a genre from the text before resorting to
+    # facets, so the default must stay strict or that ordering collapses.
+    assert _similar_genre_queries(["Severe poverty"], set(), set()) == []
+
+
+def test_childrens_stories_is_recognised_as_a_genre():
+    from server.seo import CORE_GENRES
+    assert "children's stories" in CORE_GENRES
+    assert _similar_genre_queries(["Children's stories"], set(), set()) \
+        == ["Children's stories"]

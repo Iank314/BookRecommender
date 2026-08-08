@@ -76,6 +76,8 @@ CORE_GENRES = frozenset({
     "historical fiction", "historical", "western", "war",
     "adventure", "action & adventure",
     "young adult fiction", "juvenile fiction", "children's fiction",
+    "children's stories", "juvenile literature", "picture books",
+    "middle grade", "graphic novel", "comics", "manga", "fairy tales",
     "biography", "autobiography", "memoir", "personal memoirs",
     "history", "philosophy", "psychology", "science", "business", "economics",
     "self-help", "true crime", "travel", "poetry", "drama", "classics",

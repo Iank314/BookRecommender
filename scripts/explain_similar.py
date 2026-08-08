@@ -32,8 +32,8 @@ from server.app import (
     _genre_atoms,
     _genre_score,
     _idf_weighted_f1,
+    _content_tokens,
     _score_similar_candidates,
-    _text_tokens,
 )
 
 
@@ -73,12 +73,12 @@ def main() -> None:
         raise SystemExit("No candidate scored above zero.")
 
     # Recompute the scorer's internals so each line can show its breakdown.
-    idf = _compute_token_idf(candidates)
+    idf = _compute_token_idf(candidates)  # content tokens — see _content_tokens
     default_idf = math.log(len(candidates) + 1) + 1
-    src_text = _text_tokens(source_book)
+    src_text = _content_tokens(source_book)
 
     for rank, (cand, final) in enumerate(scored[: args.top], start=1):
-        cand_text = _text_tokens(cand)
+        cand_text = _content_tokens(cand)
         desc = _idf_weighted_f1(src_text, cand_text, idf, default_idf)
         cand_genres = set(_genre_atoms(cand.tags)[0])
         genre = (
@@ -92,7 +92,7 @@ def main() -> None:
         print(f"    final {final:.3f} | desc F1 {desc:.3f} | genre {genre} "
               f"| pop {_book_popularity(cand):.2f}")
         print(f"    genres: {sorted(cand_genres) or '(tagless)'}")
-        print(f"    top shared tokens: {', '.join(shared) or '(none)'}")
+        print(f"    top shared content tokens: {', '.join(shared) or '(none)'}")
 
 
 if __name__ == "__main__":
