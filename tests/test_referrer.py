@@ -131,15 +131,22 @@ def _visits(store: ActivityStore, host: str | None, n: int, at: int | None = Non
     """Record n page views from `host`, optionally backdated to `at`.
 
     Backdating is `at > ?` (strict), so rows already pushed back to exactly
-    this timestamp stay put and repeated calls stay idempotent.
+    this timestamp stay put and repeated calls stay idempotent. It is only
+    order-safe when successive calls move *forward* in time, though: a later
+    call with a more distant `at` would drag every earlier row back with it.
+    Backdate oldest-first.
     """
-    for _ in range(n):
-        store.record("visit", None, host)
+    # One executemany rather than n calls to store.record(): the truncation
+    # test needs thousands of rows, and a commit apiece put ~80s on the suite.
+    conn = sqlite3.connect(store.db_path)
+    conn.executemany(
+        "INSERT INTO activity_log (kind, user_id, referrer) VALUES ('visit', NULL, ?)",
+        [(host,) for _ in range(n)],
+    )
     if at is not None:
-        conn = sqlite3.connect(store.db_path)
         conn.execute("UPDATE activity_log SET at = ? WHERE at > ?", (at, at))
-        conn.commit()
-        conn.close()
+    conn.commit()
+    conn.close()
 
 
 def test_report_splits_direct_from_referred(activity: ActivityStore):
@@ -217,11 +224,40 @@ def test_report_limit(activity: ActivityStore):
     assert len(activity.referrer_report(NOW, limit=3)["sources"]) == 3
 
 
+def test_truncated_report_still_accounts_for_every_visit(activity: ActivityStore):
+    """A capped list must not read as the complete picture.
+
+    Ordering by recent activity drops a high-volume source that has gone
+    quiet off the list entirely, so the totals have to cover everything —
+    otherwise the panel shows 25 of 5030 visits and says nothing about the
+    other 5005.
+    """
+    _visits(activity, "old-giant.example", 5000, at=NOW - 30 * 86_400)
+    for i in range(30):
+        _visits(activity, f"new{i:02d}.example", 1)
+
+    report = activity.referrer_report(NOW, limit=25)
+    shown = report["sources"]
+
+    assert len(shown) == 25
+    assert "old-giant.example" not in {s["host"] for s in shown}
+    # The totals see it even though the list doesn't.
+    assert report["sources_total"] == 31
+    assert report["referred_total"]["all_time"] == 5030
+    hidden = report["referred_total"]["all_time"] - sum(
+        s["all_time"] for s in shown
+    )
+    assert hidden == 5005
+
+
 def test_report_on_an_empty_log(activity: ActivityStore):
     # SUM() over zero rows is NULL in SQLite, not 0 — the panel must not
     # render "null" on a fresh deployment.
+    zeros = {"last_24h": 0, "last_7d": 0, "all_time": 0}
     assert activity.referrer_report(NOW) == {
-        "direct": {"last_24h": 0, "last_7d": 0, "all_time": 0},
+        "direct": zeros,
+        "referred_total": zeros,
+        "sources_total": 0,
         "sources": [],
     }
 

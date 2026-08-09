@@ -61,10 +61,16 @@ def main() -> None:
     print(f"Active savers:        {active_day} last 24h, {active_week} last 7d "
           "(users who saved a book — a narrower bar than a page view)")
 
-    # Traffic. Read-only connection, so an activity_log from before referrer
-    # capture (or before the table existed at all) can't be migrated here.
-    # Every query runs before anything is printed: printing as we go would let
-    # a later failure emit "Page views: 0" and "not tracked yet" together.
+    # Traffic. This duplicates ActivityStore.referrer_report rather than
+    # calling it, because constructing a store opens the DB read-write and
+    # runs migrations — the one thing this script promises not to do. The cost
+    # is that the two can drift on ordering or limit; keep them in step, or
+    # trust the admin panel over this when they disagree.
+    #
+    # Read-only also means an activity_log from before referrer capture (or
+    # before the table existed at all) can't be migrated here. Every query runs
+    # before anything is printed: printing as we go would let a later failure
+    # emit "Page views: 0" and "not tracked yet" together.
     traffic = None
     try:
         traffic = {

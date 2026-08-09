@@ -404,10 +404,23 @@ function renderAdminStats(data) {
   const refs = data.referrers || {};
   const WINDOWS = ["last_24h", "last_7d", "all_time"];
   const counts = (per) => WINDOWS.map((k) => String((per && per[k]) || 0));
-  const refRows = (refs.sources || []).map((s) => [s.host, ...counts(s)]);
+  const shown = refs.sources || [];
+  const refRows = shown.map((s) => [s.host, ...counts(s)]);
   // Direct pins to the top rather than sorting with the rest — it's the
   // baseline every other row is read against, not a competing source.
   refRows.unshift(["Direct / no referrer", ...counts(refs.direct)]);
+  // The list is ordered by recent activity and capped, so a big source that
+  // has gone quiet falls off it. Spell out the remainder — a silently
+  // truncated table reads as the whole picture.
+  const hidden = (refs.sources_total || 0) - shown.length;
+  if (hidden > 0) {
+    const residual = WINDOWS.map((k) => String(
+      ((refs.referred_total && refs.referred_total[k]) || 0)
+      - shown.reduce((sum, s) => sum + (s[k] || 0), 0),
+    ));
+    refRows.push([`… and ${hidden} other source${hidden === 1 ? "" : "s"}`,
+                  ...residual]);
+  }
 
   caption("Traffic sources (page views)");
   container.appendChild(buildTable(["Source", "24h", "7d", "All time"], refRows));
@@ -429,9 +442,11 @@ function renderAdminStats(data) {
     + "Find Similar clicks, and recommendation runs. Page views are HTML requests only "
     + "(the app shell and the public book pages); requests from known crawlers, monitors "
     + "and scripts are counted separately as crawler hits. \"(internal)\" is navigation "
-    + "from one page on this site to another. Only the referring host is stored — never "
-    + "a full URL, path or query. Events started being recorded when each feature was "
-    + "deployed; \"Last active\" reflects tracked events only.";
+    + "from one page on this site to another; \"(unknown)\" is a referrer whose host "
+    + "couldn't be read. Traffic sources are ordered by the last 7 days, so a source "
+    + "that has gone quiet may fall into the \"other sources\" row. Only the referring "
+    + "host is stored — never a full URL, path or query. Events started being recorded "
+    + "when each feature was deployed; \"Last active\" reflects tracked events only.";
   container.appendChild(note);
 
   results.classList.remove("hidden");

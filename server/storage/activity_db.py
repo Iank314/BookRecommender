@@ -113,7 +113,15 @@ class ActivityStore(SQLiteStore):
     ) -> dict:
         """Traffic sources, all three windows measured in a single pass.
 
-        Returns {"direct": {window: n}, "sources": [{host, **{window: n}}]}.
+        Returns {"direct": {window: n}, "sources": [{host, **{window: n}}],
+        "referred_total": {window: n}, "sources_total": n}.
+
+        `referred_total` and `sources_total` cover *every* referrer, not just
+        the `limit` rows in `sources`, so the caller can say how much it is
+        not showing. Ordering by recent activity means a high-volume source
+        that has gone quiet drops off the list entirely; without a residual
+        the table would read as the complete picture while omitting the
+        largest referrer on the site.
 
         Measuring every window in one query is a correctness requirement, not
         an optimisation. Querying each window separately and taking each one's
@@ -146,6 +154,16 @@ class ActivityStore(SQLiteStore):
                 "WHERE kind = ? AND referrer IS NULL",
                 (day, week, kind),
             ).fetchone()
+            referred = conn.execute(
+                f"SELECT {windows} FROM activity_log "
+                "WHERE kind = ? AND referrer IS NOT NULL",
+                (day, week, kind),
+            ).fetchone()
+            sources_total = conn.execute(
+                "SELECT COUNT(DISTINCT referrer) FROM activity_log "
+                "WHERE kind = ? AND referrer IS NOT NULL",
+                (kind,),
+            ).fetchone()[0]
             rows = conn.execute(
                 f"SELECT referrer AS host, {windows} FROM activity_log "
                 "WHERE kind = ? AND referrer IS NOT NULL GROUP BY referrer "
@@ -156,6 +174,8 @@ class ActivityStore(SQLiteStore):
         keys = ("last_24h", "last_7d", "all_time")
         return {
             "direct": {k: direct[k] for k in keys},
+            "referred_total": {k: referred[k] for k in keys},
+            "sources_total": sources_total,
             "sources": [
                 {"host": r["host"], **{k: r[k] for k in keys}} for r in rows
             ],
