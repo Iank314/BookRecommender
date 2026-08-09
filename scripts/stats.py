@@ -59,7 +59,36 @@ def main() -> None:
         "SELECT COUNT(DISTINCT user_id) FROM library_entries WHERE added_at >= ?",
         now - 7 * DAY)
     print(f"Active savers:        {active_day} last 24h, {active_week} last 7d "
-          "(users who saved a book; searches aren't tracked)")
+          "(users who saved a book — a narrower bar than a page view)")
+
+    # Traffic. Read-only connection, so an activity_log from before referrer
+    # capture (or before the table existed at all) can't be migrated here —
+    # degrade to a note rather than crashing the whole report.
+    try:
+        views_day = one("SELECT COUNT(*) FROM activity_log "
+                        "WHERE kind = 'visit' AND at >= ?", now - DAY)
+        views_week = one("SELECT COUNT(*) FROM activity_log "
+                         "WHERE kind = 'visit' AND at >= ?", now - 7 * DAY)
+        views_all = one("SELECT COUNT(*) FROM activity_log WHERE kind = 'visit'")
+        crawls_week = one("SELECT COUNT(*) FROM activity_log "
+                          "WHERE kind = 'crawl' AND at >= ?", now - 7 * DAY)
+        print(f"Page views:           {views_day} last 24h, {views_week} last 7d, "
+              f"{views_all} all time  ({crawls_week} crawler hits last 7d)")
+
+        direct = one("SELECT COUNT(*) FROM activity_log WHERE kind = 'visit' "
+                     "AND referrer IS NULL AND at >= ?", now - 7 * DAY)
+        sources = conn.execute(
+            "SELECT referrer, COUNT(*) AS n FROM activity_log "
+            "WHERE kind = 'visit' AND referrer IS NOT NULL AND at >= ? "
+            "GROUP BY referrer ORDER BY n DESC LIMIT 15",
+            (now - 7 * DAY,)).fetchall()
+        print("\nTraffic sources (last 7d):")
+        print(f"  - {'Direct / no referrer':<28} {direct}")
+        for r in sources:
+            print(f"  - {r['referrer']:<28} {r['n']}")
+    except sqlite3.OperationalError:
+        print("Page views:           not tracked in this database yet "
+              "(pre-dates referrer capture)")
 
     print("\nNewest accounts:")
     rows = conn.execute(
