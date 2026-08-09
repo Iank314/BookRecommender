@@ -398,26 +398,16 @@ function renderAdminStats(data) {
 
   // Traffic sources. The whole point is telling a Google visit from a Reddit
   // one, so the windows sit side by side: a spike only means something next
-  // to the baseline it broke from.
+  // to the baseline it broke from. The server returns all three windows per
+  // row already ordered — no merging here, because merging separately-ranked
+  // windows is what let a host render as "7 today, 0 ever".
   const refs = data.referrers || {};
   const WINDOWS = ["last_24h", "last_7d", "all_time"];
-  const byHost = new Map();
-  for (const key of WINDOWS) {
-    for (const row of (refs[key] && refs[key].top) || []) {
-      if (!byHost.has(row.host)) byHost.set(row.host, {});
-      byHost.get(row.host)[key] = row.count;
-    }
-  }
-  const counts = (per) => WINDOWS.map((k) => String(per[k] || 0));
-  const direct = {};
-  for (const key of WINDOWS) direct[key] = (refs[key] && refs[key].direct) || 0;
-
-  const refRows = [...byHost.entries()]
-    .sort((a, b) => (b[1].all_time || 0) - (a[1].all_time || 0))
-    .map(([host, per]) => [host, ...counts(per)]);
+  const counts = (per) => WINDOWS.map((k) => String((per && per[k]) || 0));
+  const refRows = (refs.sources || []).map((s) => [s.host, ...counts(s)]);
   // Direct pins to the top rather than sorting with the rest — it's the
   // baseline every other row is read against, not a competing source.
-  refRows.unshift(["Direct / no referrer", ...counts(direct)]);
+  refRows.unshift(["Direct / no referrer", ...counts(refs.direct)]);
 
   caption("Traffic sources (page views)");
   container.appendChild(buildTable(["Source", "24h", "7d", "All time"], refRows));

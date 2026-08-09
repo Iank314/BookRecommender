@@ -62,33 +62,43 @@ def main() -> None:
           "(users who saved a book — a narrower bar than a page view)")
 
     # Traffic. Read-only connection, so an activity_log from before referrer
-    # capture (or before the table existed at all) can't be migrated here —
-    # degrade to a note rather than crashing the whole report.
+    # capture (or before the table existed at all) can't be migrated here.
+    # Every query runs before anything is printed: printing as we go would let
+    # a later failure emit "Page views: 0" and "not tracked yet" together.
+    traffic = None
     try:
-        views_day = one("SELECT COUNT(*) FROM activity_log "
-                        "WHERE kind = 'visit' AND at >= ?", now - DAY)
-        views_week = one("SELECT COUNT(*) FROM activity_log "
-                         "WHERE kind = 'visit' AND at >= ?", now - 7 * DAY)
-        views_all = one("SELECT COUNT(*) FROM activity_log WHERE kind = 'visit'")
-        crawls_week = one("SELECT COUNT(*) FROM activity_log "
-                          "WHERE kind = 'crawl' AND at >= ?", now - 7 * DAY)
-        print(f"Page views:           {views_day} last 24h, {views_week} last 7d, "
-              f"{views_all} all time  ({crawls_week} crawler hits last 7d)")
-
-        direct = one("SELECT COUNT(*) FROM activity_log WHERE kind = 'visit' "
-                     "AND referrer IS NULL AND at >= ?", now - 7 * DAY)
-        sources = conn.execute(
-            "SELECT referrer, COUNT(*) AS n FROM activity_log "
-            "WHERE kind = 'visit' AND referrer IS NOT NULL AND at >= ? "
-            "GROUP BY referrer ORDER BY n DESC LIMIT 15",
-            (now - 7 * DAY,)).fetchall()
-        print("\nTraffic sources (last 7d):")
-        print(f"  - {'Direct / no referrer':<28} {direct}")
-        for r in sources:
-            print(f"  - {r['referrer']:<28} {r['n']}")
+        traffic = {
+            "views": [
+                one("SELECT COUNT(*) FROM activity_log "
+                    "WHERE kind = 'visit' AND at >= ?", now - DAY),
+                one("SELECT COUNT(*) FROM activity_log "
+                    "WHERE kind = 'visit' AND at >= ?", now - 7 * DAY),
+                one("SELECT COUNT(*) FROM activity_log WHERE kind = 'visit'"),
+            ],
+            "crawls_week": one("SELECT COUNT(*) FROM activity_log "
+                               "WHERE kind = 'crawl' AND at >= ?", now - 7 * DAY),
+            "direct": one("SELECT COUNT(*) FROM activity_log WHERE kind = 'visit' "
+                          "AND referrer IS NULL AND at >= ?", now - 7 * DAY),
+            "sources": conn.execute(
+                "SELECT referrer, COUNT(*) AS n FROM activity_log "
+                "WHERE kind = 'visit' AND referrer IS NOT NULL AND at >= ? "
+                "GROUP BY referrer ORDER BY n DESC, referrer ASC LIMIT 15",
+                (now - 7 * DAY,)).fetchall(),
+        }
     except sqlite3.OperationalError:
+        pass
+
+    if traffic is None:
         print("Page views:           not tracked in this database yet "
               "(pre-dates referrer capture)")
+    else:
+        day_v, week_v, all_v = traffic["views"]
+        print(f"Page views:           {day_v} last 24h, {week_v} last 7d, "
+              f"{all_v} all time  ({traffic['crawls_week']} crawler hits last 7d)")
+        print("\nTraffic sources (last 7d):")
+        print(f"  - {'Direct / no referrer':<28} {traffic['direct']}")
+        for r in traffic["sources"]:
+            print(f"  - {r['referrer']:<28} {r['n']}")
 
     print("\nNewest accounts:")
     rows = conn.execute(

@@ -12,8 +12,18 @@ from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
-from fastapi import Body, Cookie, Depends, FastAPI, HTTPException, Query, Response
+from fastapi import (
+    Body,
+    Cookie,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+)
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -137,15 +147,22 @@ def _maybe_log_tracemalloc() -> None:
 @app.middleware("http")
 async def _timing_middleware(request, call_next):
     """Log method / path / status / duration for every request. This is the one
-    piece of runtime visibility the app previously lacked entirely."""
+    piece of runtime visibility the app previously lacked entirely.
+
+    Reads the path straight out of the ASGI scope rather than `request.url`:
+    building that URL parses the Host header, and a malformed one ("Host:
+    [oops") makes urlsplit raise ValueError. Since this middleware wraps every
+    route, that turned one bad header into a 500 on any endpoint. Caddy
+    shields production by matching hostnames first, but the tunnel and
+    direct-to-uvicorn paths have no such guard.
+    """
+    path = request.scope.get("path", "?")
     start = time.perf_counter()
     try:
         response = await call_next(request)
     except Exception:
         elapsed_ms = (time.perf_counter() - start) * 1000
-        logger.exception(
-            "%s %s -> EXC %.1fms", request.method, request.url.path, elapsed_ms
-        )
+        logger.exception("%s %s -> EXC %.1fms", request.method, path, elapsed_ms)
         raise
     elapsed_ms = (time.perf_counter() - start) * 1000
     level = (
@@ -155,7 +172,7 @@ async def _timing_middleware(request, call_next):
     )
     logger.log(
         level, "%s %s -> %s %.1fms",
-        request.method, request.url.path, response.status_code, elapsed_ms,
+        request.method, path, response.status_code, elapsed_ms,
     )
     if _TRACEMALLOC_ON:
         # Snapshotting the whole heap is slow; run it off the event loop so the
@@ -1525,16 +1542,151 @@ login_throttle = LoginThrottle()
 
 def _soft_user_id(session_token: str | None) -> str | None:
     """Resolve a session cookie to a user_id without requiring one — for
-    attributing activity on endpoints that are open to anonymous visitors."""
-    return user_store.user_for_session(session_token) if session_token else None
+    attributing activity on endpoints that are open to anonymous visitors.
+
+    Storage errors resolve to None rather than propagating. This is a SQLite
+    read, so "database is locked" under concurrent writes is a real failure
+    mode, and every caller is feeding the stats log — the same contract as
+    _record_activity below. Losing the attribution on one row is nothing;
+    failing the request it was attached to is not.
+    """
+    if not session_token:
+        return None
+    try:
+        return user_store.user_for_session(session_token)
+    except Exception:
+        logger.warning("Soft session lookup failed.", exc_info=True)
+        return None
 
 
-def _record_activity(kind: str, user_id: str | None) -> None:
+def _record_activity(
+    kind: str, user_id: str | None, referrer: str | None = None
+) -> None:
     """Best-effort: a stats insert must never fail a real request."""
     try:
-        activity_store.record(kind, user_id)
+        activity_store.record(kind, user_id, referrer)
     except Exception:
         logger.warning("Failed to record %s activity.", kind, exc_info=True)
+
+
+# ------------------------------------------------------------------ #
+# Page views and referrers — where traffic actually comes from
+# ------------------------------------------------------------------ #
+# Hostnames cannot contain parentheses, so these sentinels can never collide
+# with — or be forged as — a real referrer host.
+REFERRER_INTERNAL = "(internal)"
+REFERRER_UNKNOWN = "(unknown)"
+
+# What a hostname may contain. Anything else in the Referer's host position is
+# junk or a forgery attempt, not a source worth a row.
+_HOSTNAME_RE = re.compile(r"^[a-z0-9.-]+$")
+
+# Substrings that mark a client as a crawler rather than a reader. Crawler
+# hits are logged under their own kind so a Googlebot sweep of the public
+# pages can't read as an audience — and so "is Google actually crawling
+# these?" stays an answerable question once pages are published.
+_BOT_UA_MARKERS = (
+    "bot", "crawler", "spider", "slurp", "archiver", "facebookexternalhit",
+    "embedly", "quora link preview", "pinterest", "monitor", "uptime",
+    "curl/", "wget/", "python-requests", "go-http-client", "headlesschrome",
+)
+
+
+def _is_bot_ua(user_agent: str | None) -> bool:
+    """True for crawlers, monitors and scripts.
+
+    A missing User-Agent counts as a bot: every real browser sends one, and
+    the population that doesn't is overwhelmingly scripted. Miscounting a
+    hardened browser as a crawler is the cheaper error — it understates the
+    audience rather than inventing one.
+    """
+    ua = (user_agent or "").lower()
+    if not ua:
+        return True
+    return any(marker in ua for marker in _BOT_UA_MARKERS)
+
+
+def _normalize_referrer(raw: str | None, own_host: str | None = None) -> str | None:
+    """Reduce a Referer header to a bare host, or None for a direct hit.
+
+    Host only, never the path or query — some sites put the visitor's search
+    terms in the referrer URL, and activity_log's contract is that it stores
+    no queries. `www.` is stripped so google.com and www.google.com don't
+    split one source into two rows.
+
+    Self-referrals collapse to REFERRER_INTERNAL rather than None: in-site
+    navigation (the app linking to a public page) is not someone arriving
+    cold, and folding it into "direct" would overstate direct traffic exactly
+    as the public pages start getting internal links.
+    """
+    if not raw:
+        return None
+    try:
+        host = (urlparse(raw.strip()).hostname or "").lower()
+    except ValueError:
+        # Malformed URL (a bad IPv6 literal, say). No referrer is better than
+        # a junk row, and this must never raise on the request path.
+        return None
+    if not host:
+        return None
+    if not _HOSTNAME_RE.match(host):
+        # A host that isn't plain ASCII: an internationalised domain that the
+        # client didn't punycode, or a crafted header. The visit came from
+        # *somewhere*, so filing it under "direct" would be the same lie
+        # REFERRER_INTERNAL exists to prevent — bucket it honestly instead.
+        # Parentheses can't survive this check, so neither sentinel can be
+        # forged by sending one as a Referer.
+        return REFERRER_UNKNOWN
+    host = host.removeprefix("www.")
+    # BASE_URL is defined further down with the public pages; it's resolved at
+    # call time, which is always after import.
+    canonical = (urlparse(BASE_URL).hostname or "").lower().removeprefix("www.")
+    if host == (own_host or "").lower().removeprefix("www.") or host == canonical:
+        return REFERRER_INTERNAL
+    return host
+
+
+def _referrer_host(request: Request) -> str | None:
+    try:
+        own_host = request.url.hostname
+    except ValueError:
+        # Starlette rebuilds the URL from the Host header, and a malformed one
+        # ("Host: [oops") makes urlsplit raise. Only self-referral detection
+        # needs it, so degrade rather than lose the whole row.
+        own_host = None
+    # "Referer" is the spec's historic misspelling; a few clients send the
+    # correct spelling instead, so accept either.
+    return _normalize_referrer(
+        request.headers.get("referer") or request.headers.get("referrer"),
+        own_host,
+    )
+
+
+def _record_visit(request: Request, session_token: str | None) -> None:
+    """Log a document request and where it came from.
+
+    Only the routes that serve HTML call this. The SPA's JSON endpoints
+    (/search, /similar, /library/recommend) are fetched *from* a page on this
+    origin, so their Referer is always our own host — capturing it there would
+    record nothing but self-referrals. Acquisition is only visible on the
+    document request itself.
+
+    HEAD is skipped: uptime monitors poll the homepage on a fixed schedule and
+    would otherwise dominate the visit count.
+    """
+    try:
+        if request.method != "GET":
+            return
+        kind = "crawl" if _is_bot_ua(request.headers.get("user-agent")) else "visit"
+        _record_activity(kind, _soft_user_id(session_token), _referrer_host(request))
+    except Exception:
+        # Deliberately outside _record_activity's own guard as well as inside
+        # it. Everything feeding that call — the session lookup, the referrer
+        # parse — is evaluated *as an argument*, i.e. before the call and so
+        # outside its try. That's survivable on a JSON endpoint; this one runs
+        # on the app shell and every public page, so nothing here may reach
+        # the client.
+        logger.warning("Failed to record a page view.", exc_info=True)
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
@@ -1695,12 +1847,19 @@ def admin_stats(user_id: str = Depends(get_admin_user_id)):
         "now": now,
         "accounts_total": len(accounts),
         "accounts": accounts,
-        # Events by kind: search (page 1 only), similar, recommend.
+        # Events by kind: search (page 1 only), similar, recommend, plus
+        # visit/crawl for HTML page requests.
         "activity": {
             "last_24h": activity_store.counts_since(day),
             "last_7d": activity_store.counts_since(week),
             "all_time": activity_store.counts_since(0),
         },
+        # Where page views came from, all windows in one pass so the columns
+        # can't contradict each other. Scoped to `visit` because only document
+        # requests carry a usable Referer — see _record_visit. "direct" means
+        # no referrer header at all; in-site navigation appears as
+        # "(internal)" and an unparseable host as "(unknown)".
+        "referrers": activity_store.referrer_report(now),
         # Distinct logged-in users with any tracked event.
         "active_users": {
             "last_24h": activity_store.active_users_since(day),
@@ -3234,7 +3393,11 @@ def _to_out(b, relevance: float | None = None) -> dict:
 # browsers (GET) work fine. FileResponse handles HEAD natively (headers only).
 @app.get("/", include_in_schema=False)
 @app.head("/", include_in_schema=False)
-def serve_frontend():
+def serve_frontend(
+    request: Request,
+    bookrec_session: str | None = Cookie(default=None),
+):
+    _record_visit(request, bookrec_session)
     return FileResponse(FRONTEND_DIR / "index.html")
 
 
@@ -3263,13 +3426,17 @@ SEO_ASSET_VERSION = 15
 
 @app.get("/books-like", include_in_schema=False)
 @app.head("/books-like", include_in_schema=False)
-def books_like_index():
+def books_like_index(
+    request: Request,
+    bookrec_session: str | None = Cookie(default=None),
+):
     """Hub page listing every published book page.
 
     Exists for crawl discovery as much as for readers: it gives every page an
     internal link from a single reachable URL, so nothing depends on the
     sitemap alone being fetched.
     """
+    _record_visit(request, bookrec_session)
     pages = seo_store.list_pages()
     html = _templates.get_template("books_like_index.html").render(
         pages=pages,
@@ -3281,8 +3448,13 @@ def books_like_index():
 
 @app.get("/books-like/{slug}", include_in_schema=False)
 @app.head("/books-like/{slug}", include_in_schema=False)
-def books_like_page(slug: str):
+def books_like_page(
+    slug: str,
+    request: Request,
+    bookrec_session: str | None = Cookie(default=None),
+):
     """One public recommendation page, or a real 404 for an unpublished slug."""
+    _record_visit(request, bookrec_session)
     page = seo_store.get(slug)
     if page is None:
         html = _templates.get_template("not_found.html").render(
