@@ -338,6 +338,8 @@ function renderAdminStats(data) {
   const memLabel = mem.peak_rss_mb != null ? `Memory RSS (peak ${mem.peak_rss_mb} MB)` : "Memory RSS";
   const spec = [
     [`${data.active_users.last_24h} / ${data.active_users.last_7d}`, "Active users (24h / 7d)"],
+    [`${n(a24, "visit")} / ${n(a7, "visit")} / ${n(all, "visit")}`, "Page views (24h / 7d / all)"],
+    [`${n(a24, "crawl")} / ${n(a7, "crawl")} / ${n(all, "crawl")}`, "Crawler hits (24h / 7d / all)"],
     [`${n(a24, "search")} / ${n(a7, "search")} / ${n(all, "search")}`, "Searches (24h / 7d / all)"],
     [`${n(a24, "similar")} / ${n(a7, "similar")} / ${n(all, "similar")}`, "Find Similar (24h / 7d / all)"],
     [`${n(a24, "recommend")} / ${n(a7, "recommend")} / ${n(all, "recommend")}`, "Recommendations (24h / 7d / all)"],
@@ -360,43 +362,86 @@ function renderAdminStats(data) {
   }
   container.appendChild(cards);
 
-  // Accounts table.
-  const table = document.createElement("table");
-  table.className = "stats-table";
-  const thead = document.createElement("thead");
-  const headRow = document.createElement("tr");
-  for (const h of ["Username", "Registered", "Books saved", "Last active"]) {
-    const th = document.createElement("th");
-    th.textContent = h;
-    headRow.appendChild(th);
-  }
-  thead.appendChild(headRow);
-  table.appendChild(thead);
+  const buildTable = (headers, rows) => {
+    const table = document.createElement("table");
+    table.className = "stats-table";
+    const thead = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    for (const h of headers) {
+      const th = document.createElement("th");
+      th.textContent = h;
+      headRow.appendChild(th);
+    }
+    thead.appendChild(headRow);
+    table.appendChild(thead);
 
-  const tbody = document.createElement("tbody");
-  for (const acct of data.accounts) {
-    const tr = document.createElement("tr");
-    const cells = [
+    const tbody = document.createElement("tbody");
+    for (const cells of rows) {
+      const tr = document.createElement("tr");
+      for (const text of cells) {
+        const td = document.createElement("td");
+        td.textContent = text;
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    return table;
+  };
+
+  const caption = (text) => {
+    const h = document.createElement("h3");
+    h.className = "stats-caption";
+    h.textContent = text;
+    container.appendChild(h);
+  };
+
+  // Traffic sources. The whole point is telling a Google visit from a Reddit
+  // one, so the windows sit side by side: a spike only means something next
+  // to the baseline it broke from.
+  const refs = data.referrers || {};
+  const WINDOWS = ["last_24h", "last_7d", "all_time"];
+  const byHost = new Map();
+  for (const key of WINDOWS) {
+    for (const row of (refs[key] && refs[key].top) || []) {
+      if (!byHost.has(row.host)) byHost.set(row.host, {});
+      byHost.get(row.host)[key] = row.count;
+    }
+  }
+  const counts = (per) => WINDOWS.map((k) => String(per[k] || 0));
+  const direct = {};
+  for (const key of WINDOWS) direct[key] = (refs[key] && refs[key].direct) || 0;
+
+  const refRows = [...byHost.entries()]
+    .sort((a, b) => (b[1].all_time || 0) - (a[1].all_time || 0))
+    .map(([host, per]) => [host, ...counts(per)]);
+  // Direct pins to the top rather than sorting with the rest — it's the
+  // baseline every other row is read against, not a competing source.
+  refRows.unshift(["Direct / no referrer", ...counts(direct)]);
+
+  caption("Traffic sources (page views)");
+  container.appendChild(buildTable(["Source", "24h", "7d", "All time"], refRows));
+
+  caption("Accounts");
+  container.appendChild(buildTable(
+    ["Username", "Registered", "Books saved", "Last active"],
+    data.accounts.map((acct) => [
       acct.username + (acct.is_admin ? " 👑" : ""),
       ago(acct.created_at),
       String(acct.books_saved),
       ago(acct.last_active),
-    ];
-    for (const text of cells) {
-      const td = document.createElement("td");
-      td.textContent = text;
-      tr.appendChild(td);
-    }
-    tbody.appendChild(tr);
-  }
-  table.appendChild(tbody);
-  container.appendChild(table);
+    ]),
+  ));
 
   const note = document.createElement("p");
   note.className = "library-hint";
-  note.textContent = "Activity tracking counts searches (first page only), Find Similar clicks, "
-    + "and recommendation runs. Events started being recorded when this feature was deployed; "
-    + "\"Last active\" reflects tracked events only.";
+  note.textContent = "Activity tracking counts page views, searches (first page only), "
+    + "Find Similar clicks, and recommendation runs. Page views are HTML requests only "
+    + "(the app shell and the public book pages); requests from known crawlers, monitors "
+    + "and scripts are counted separately as crawler hits. \"(internal)\" is navigation "
+    + "from one page on this site to another. Only the referring host is stored — never "
+    + "a full URL, path or query. Events started being recorded when each feature was "
+    + "deployed; \"Last active\" reflects tracked events only.";
   container.appendChild(note);
 
   results.classList.remove("hidden");

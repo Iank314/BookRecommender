@@ -846,6 +846,17 @@ main {
   color: #8b8d97;
 }
 
+/* Section heading above each stats table — the panel shows more than one now,
+   and an unlabelled second table reads as a continuation of the first. */
+.stats-caption {
+  margin: 1.6rem 0 0.5rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8b8d97;
+}
+
 .stats-table {
   width: 100%;
   border-collapse: collapse;
