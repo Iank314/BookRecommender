@@ -8,7 +8,7 @@
 #
 # Requires DNS for iansbookrecs.com (and www) pointing at the instance, and
 # the security group allowing inbound 80 + 443.
-
+ 
 services:
   bookrec:
     build: .
