@@ -2357,6 +2357,88 @@ def _real_genres(atoms: set[str]) -> set[str]:
     return {a for a in atoms if a in CORE_GENRES} - _AUDIENCE_ATOMS
 
 
+# Subgenre -> the broader genre(s) it belongs to.
+#
+# Genre agreement is set overlap, and set overlap has no notion of "high
+# fantasy is a kind of fantasy". Measured: a source tagged `high fantasy`
+# scored 0.000 against every candidate tagged `fantasy`, in both directions,
+# and likewise space opera/science fiction, cozy mystery/mystery, psychological
+# thriller/thriller. On Mistborn — whose OL record is `high fantasy` — that
+# left 1 of 472 genre-tagged candidates above the floor, with Erikson's
+# Malazan and McClellan both scoring a flat zero on genre.
+#
+# The bug is old but was largely latent: while Open Library returned no
+# subjects at all, the genre signal came from Google Books' coarse
+# "Fiction / Fantasy" categories, which *are* the parent terms. Once the
+# `fields` parameter gave every OL candidate a precise subgenre atom, the
+# mismatch became the common case — on the term carrying most of the blend.
+#
+# Deliberately conservative. Only subsumptions a reader would agree with; a
+# wrong edge here silently merges two genres for every book that carries it.
+# Left out on purpose: `dystopian` and `post-apocalyptic` (The Road is
+# neither science fiction nor a happy fit), `erotica` -> romance, `litrpg` and
+# `gamelit` (claimed by both fantasy and science fiction), and `magic realism`,
+# which is a literary mode rather than a shelf in the fantasy section.
+_GENRE_PARENTS: dict[str, tuple[str, ...]] = {
+    # Fantasy
+    "high fantasy": ("fantasy",),
+    "epic fantasy": ("fantasy",),
+    "dark fantasy": ("fantasy",),
+    "urban fantasy": ("fantasy",),
+    "heroic fantasy": ("fantasy",),
+    "sword and sorcery": ("fantasy",),
+    "romantasy": ("fantasy", "romance"),
+    "science fantasy": ("fantasy", "science fiction"),
+    # Science fiction
+    "space opera": ("science fiction",),
+    "cyberpunk": ("science fiction",),
+    "hard science fiction": ("science fiction",),
+    "steampunk": ("science fiction",),
+    "time travel": ("science fiction",),
+    # Mystery and crime
+    "detective": ("mystery",),
+    "cozy mystery": ("mystery",),
+    "murder mystery": ("mystery",),
+    "whodunit": ("mystery",),
+    "police procedural": ("crime", "mystery"),
+    "noir": ("crime",),
+    # Thriller
+    "psychological thriller": ("thriller",),
+    "techno-thriller": ("thriller",),
+    "legal thriller": ("thriller",),
+    "spy": ("thriller",),
+    "espionage": ("thriller",),
+    # Horror
+    "gothic": ("horror",),
+    "ghost": ("horror",),
+    "cosmic horror": ("horror",),
+    "supernatural horror": ("horror",),
+    # Romance
+    "paranormal romance": ("romance",),
+    "contemporary romance": ("romance",),
+    "historical romance": ("romance", "historical fiction"),
+    "romantic suspense": ("romance", "thriller"),
+    # Historical
+    "historical": ("historical fiction",),
+}
+
+
+def _with_genre_parents(atoms: set[str]) -> set[str]:
+    """Atoms plus the broader genre each one belongs to.
+
+    Applied *before* the CORE_GENRES filter in _real_genres, deliberately: a
+    subgenre the vocabulary has never heard of ("cozy mystery", "steampunk")
+    is dropped by that filter, so expanding afterwards would leave exactly the
+    long-tail atoms this exists to rescue with nothing to contribute. The
+    specific atom is kept alongside its parent, so an exact subgenre match
+    still outranks a parent-only one.
+    """
+    out = set(atoms)
+    for atom in atoms:
+        out.update(_GENRE_PARENTS.get(atom, ()))
+    return out
+
+
 def _similar_genre_score(cand_atoms: set[str], profile_atoms: set[str]) -> float:
     """Genre agreement between a candidate and the source, for /similar.
 
@@ -2372,7 +2454,7 @@ def _similar_genre_score(cand_atoms: set[str], profile_atoms: set[str]) -> float
     all, so books the genre vocabulary doesn't cover degrade rather than
     score zero across the board.
     """
-    profile_genres = _real_genres(profile_atoms)
+    profile_genres = _real_genres(_with_genre_parents(profile_atoms))
     if not profile_genres:
         # Fall back to the old measure only when there's nothing recognisable
         # at all. If the source's atoms are *audience* atoms, falling back
@@ -2389,7 +2471,7 @@ def _similar_genre_score(cand_atoms: set[str], profile_atoms: set[str]) -> float
     # correct fantasy match score 0.25 and drops the book's top result from
     # 45% to 21%. Two shared genres is already strong evidence, and demanding
     # more punishes candidates for the source's bad tags.
-    matched = len(_real_genres(cand_atoms) & profile_genres)
+    matched = len(_real_genres(_with_genre_parents(cand_atoms)) & profile_genres)
     coverage = min(matched / min(len(profile_genres), 2), 1.0)
     shares_audience = bool(
         (cand_atoms & _AUDIENCE_ATOMS) & (profile_atoms & _AUDIENCE_ATOMS)

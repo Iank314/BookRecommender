@@ -325,6 +325,67 @@ def test_extra_tags_no_longer_penalise_a_candidate():
         _similar_genre_score(sparse, HOBBIT_PROFILE)
 
 
+# ---- subgenre / parent-genre subsumption -------------------------------------
+# Genre agreement is set overlap, which has no notion of "high fantasy is a kind
+# of fantasy". Measured before the fix: every pair below scored 0.000 in both
+# directions. It was mostly latent while Open Library returned no subjects — the
+# signal came from Google Books' coarse "Fiction / Fantasy" categories, i.e. the
+# parent terms — and became the common case once the `fields` parameter started
+# supplying precise subgenre atoms for every OL candidate.
+
+SUBGENRE_PAIRS = [
+    ("high fantasy", "fantasy"),
+    ("epic fantasy", "fantasy"),
+    ("dark fantasy", "fantasy"),
+    ("urban fantasy", "fantasy"),
+    ("space opera", "science fiction"),
+    ("cyberpunk", "science fiction"),
+    ("cozy mystery", "mystery"),
+    ("detective", "mystery"),
+    ("psychological thriller", "thriller"),
+    ("gothic", "horror"),
+    ("paranormal romance", "romance"),
+]
+
+
+@pytest.mark.parametrize("sub,parent", SUBGENRE_PAIRS)
+def test_a_subgenre_source_gets_credit_from_its_parent(sub, parent):
+    # Mistborn's OL record is `high fantasy`; Erikson's Malazan is `fantasy`.
+    # Scoring that pair at zero left 1 of 472 candidates above the floor.
+    assert _similar_genre_score({parent}, {sub}) > 0
+
+
+@pytest.mark.parametrize("sub,parent", SUBGENRE_PAIRS)
+def test_a_parent_source_gets_credit_from_its_subgenre(sub, parent):
+    assert _similar_genre_score({sub}, {parent}) > 0
+
+
+@pytest.mark.parametrize("sub,parent", SUBGENRE_PAIRS)
+def test_an_exact_subgenre_match_still_outranks_a_parent_only_match(sub, parent):
+    # Widening must not flatten the ranking: "high fantasy" is a better answer
+    # for a high-fantasy source than plain "fantasy" is.
+    assert _similar_genre_score({sub}, {sub}) >= _similar_genre_score({parent}, {sub})
+
+
+def test_subsumption_does_not_merge_unrelated_genres():
+    # The risk of a parent map is a wrong edge silently fusing two genres.
+    assert _similar_genre_score({"romance"}, {"high fantasy"}) == 0.0
+    assert _similar_genre_score({"cooking"}, {"space opera"}) == 0.0
+    assert _similar_genre_score({"mystery"}, {"fantasy"}) == 0.0
+
+
+def test_contested_subgenres_are_deliberately_not_mapped():
+    # Left out on purpose — see the note on _GENRE_PARENTS. The Road is neither
+    # science fiction nor a comfortable fit for either label.
+    assert _similar_genre_score({"science fiction"}, {"dystopian"}) == 0.0
+    assert _similar_genre_score({"romance"}, {"erotica"}) == 0.0
+
+
+def test_exact_matches_are_unchanged_by_subsumption():
+    for atoms in ({"fantasy"}, {"high fantasy"}, {"fantasy", "science fiction"}):
+        assert _similar_genre_score(atoms, atoms) == pytest.approx(0.85)
+
+
 def test_audience_still_counts_for_something():
     # A children's fantasy should beat an adult fantasy for a children's
     # source — just not beat it on audience alone.
