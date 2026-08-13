@@ -89,7 +89,12 @@ def test_from_openlib_doc_drops_reader_note_first_sentence():
     assert "to my liking" not in book.description
     assert "gmb" not in book.description
     # It falls back to the synthesized-from-fields description instead.
-    assert "Science Fiction" in book.description
+    assert "First published in 2012." in book.description
+    # Subjects are NOT part of that fallback — a book's blurb must not be its
+    # own genre list (see test_subjects_do_not_leak_into_the_description).
+    # They're captured as tags instead.
+    assert "Science Fiction" not in book.description
+    assert "Science Fiction" in book.tags
 
 
 # ---- ingestion point 2: fetch_work_detail (work description) -----------------

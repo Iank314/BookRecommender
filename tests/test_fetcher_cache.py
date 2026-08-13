@@ -159,6 +159,48 @@ def test_requested_fields_cover_what_the_parser_reads():
     assert read_by_parser <= set(fetcher._OL_SEARCH_FIELDS.split(","))
 
 
+def test_subjects_do_not_leak_into_the_description():
+    """A book's blurb must not be its own genre list.
+
+    Regression from adding `fields`: the fallback branch had a "Subjects: ..."
+    line that was dead code while OL returned no subjects, and came alive the
+    moment the request started asking for them. It double-counted genre into
+    the description score, and — because it grew descriptions from ~45 to ~170
+    characters — pushed them past the `len(description) < 60` test that
+    triggers a real work-detail fetch, so the fuller blurb was never retrieved.
+    """
+    doc = {
+        "key": "/works/OL1W",
+        "title": "The Poppy War",
+        "author_name": ["R. F. Kuang"],
+        "first_publish_year": 2018,
+        "subject": ["Fiction", "Fantasy", "Historical", "Epic", "Goddesses"],
+        # no first_sentence — this is the fallback path
+    }
+    book = fetcher.Fetcher._from_openlib_doc(doc)
+
+    assert "Subjects:" not in book.description
+    assert "Goddesses" not in book.description
+    # The subjects are still captured — in tags, where they belong.
+    assert "Fantasy" in book.tags
+    # And the description stays short enough that _ensure_details will still
+    # fetch a real one (its threshold is 60 characters).
+    assert len(book.description) < 60, book.description
+
+
+def test_first_sentence_still_wins_over_the_fallback():
+    doc = {
+        "key": "/works/OL2W",
+        "title": "A Book",
+        "author_name": ["Someone"],
+        "first_publish_year": 1999,
+        "subject": ["Fantasy"],
+        "first_sentence": "It was a bright cold day in April.",
+    }
+    book = fetcher.Fetcher._from_openlib_doc(doc)
+    assert book.description == "It was a bright cold day in April."
+
+
 # ---------------------------------------------------------------- politeness
 # Open Library's API policy requires a client to identify itself and give a way
 # to be contacted. This app sent the default python-requests agent for its

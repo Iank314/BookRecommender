@@ -387,15 +387,24 @@ class Fetcher:
         if _looks_like_reader_note(str(raw or "")):
             raw = ""  # community-edited note, not the book's first sentence
 
-        # Build a description from available fields if first_sentence is empty
+        # Build a description from available fields if first_sentence is empty.
+        #
+        # Subjects deliberately do NOT go in here. They used to, because before
+        # the `fields` parameter existed this parser never received any and the
+        # line was dead code that came alive the moment it did — putting a
+        # book's own genre list into its blurb. Two ways that hurts: the
+        # description score then re-measures genre overlap the genre score has
+        # already counted, and the padding pushed descriptions from ~45 to
+        # ~170 characters, past the `len(description) < 60` test that triggers
+        # a work-detail fetch. Measured over 50 epic-fantasy results: real
+        # description enrichment fired for 6 books with the subject list in
+        # place and 31 without it. Subjects belong in `tags`, which is where
+        # they now go.
         if not raw:
             parts = []
             subtitle = doc.get("subtitle", "")
             if subtitle:
                 parts.append(subtitle)
-            subjects = doc.get("subject", [])
-            if subjects:
-                parts.append("Subjects: " + ", ".join(subjects[:8]))
             year = doc.get("first_publish_year")
             if year:
                 parts.append(f"First published in {year}.")
