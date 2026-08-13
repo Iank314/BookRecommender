@@ -386,6 +386,83 @@ def test_exact_matches_are_unchanged_by_subsumption():
         assert _similar_genre_score(atoms, atoms) == pytest.approx(0.85)
 
 
+# ---- source description recovery ---------------------------------------------
+# A source with no usable description makes genre 100% of the score instead of
+# 34%, and genre is effectively binary — so every book sharing a genre ties at
+# the same score and ranking collapses to a popularity nudge. In production
+# that returned 1654 results for Mistborn, led by Le Petit Prince.
+
+def test_title_lookup_follows_the_work_record_for_a_blurb(monkeypatch):
+    """OL search records carry boilerplate; the real blurb is one fetch away.
+
+    A source that resolved to a Google Books id never qualifies for
+    _ensure_details' work-detail path, so when Google Books is down this is
+    the only route to a description. Measured on Mistborn: every OL search
+    sibling stopped at 76 characters, the work record holds 1436.
+    """
+    import server.app as app
+    from server.models.book import Books
+
+    boilerplate = "First published in 2012. | By Brandon Sanderson."
+    sibling = Books(id="ol_/works/OL42W", title="Mistborn",
+                    authors=["Brandon Sanderson"], description=boilerplate,
+                    tags=["Fiction"], metadata={})
+
+    class _FakeFetcher:
+        def __init__(self, source=None, **kw): pass
+        def fetch_google_page(self, *a, **k):
+            raise RuntimeError("Google Books is 503ing")   # the production case
+        def fetch_page(self, *a, **k):
+            return [sibling], 1
+        def fetch_work_detail(self, key):
+            assert key == "/works/OL42W"
+            return ("A thousand years ago the Lord Ruler seized control. " * 6,
+                    ["Fantasy", "Epic"])
+
+    monkeypatch.setattr(app, "Fetcher", _FakeFetcher)
+    source = Books(id="gb_XYZ", title="Mistborn", authors=["Brandon Sanderson"],
+                   description="Short blurb.", tags=["Fiction"], metadata={})
+    app._enrich_source_by_title_lookup(source)
+
+    assert len(source.description) > app.MIN_USABLE_DESC
+    assert "Lord Ruler" in source.description
+    assert "Fantasy" in source.tags
+
+
+def test_title_lookup_skips_the_work_fetch_when_it_already_has_a_blurb(monkeypatch):
+    # The extra request is a last resort, not a default -- it runs per source
+    # on a provider that has blocked this app's IP before.
+    import server.app as app
+    from server.models.book import Books
+
+    # Needs enough *distinct* content tokens to pass _has_usable_text --
+    # _tokenize returns a set, so repeating a sentence adds nothing.
+    real_blurb = ("A thousand years ago the Lord Ruler seized control of the "
+                  "Final Empire, and ash now falls from a darkened sky.")
+    sibling = Books(id="ol_/works/OL42W", title="Mistborn",
+                    authors=["Brandon Sanderson"], description=real_blurb,
+                    tags=["Fantasy"], metadata={})
+    calls = []
+
+    class _FakeFetcher:
+        def __init__(self, source=None, **kw): pass
+        def fetch_google_page(self, *a, **k):
+            raise RuntimeError("no GB")
+        def fetch_page(self, *a, **k):
+            return [sibling], 1
+        def fetch_work_detail(self, key):
+            calls.append(key)
+            return ("", [])
+
+    monkeypatch.setattr(app, "Fetcher", _FakeFetcher)
+    source = Books(id="gb_XYZ", title="Mistborn", authors=["Brandon Sanderson"],
+                   description="", tags=[], metadata={})
+    app._enrich_source_by_title_lookup(source)
+
+    assert calls == [], "work detail fetched despite a usable blurb already found"
+    assert source.description == real_blurb
+
+
 def test_audience_still_counts_for_something():
     # A children's fantasy should beat an adult fantasy for a children's
     # source — just not beat it on audience alone.

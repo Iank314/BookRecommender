@@ -5,6 +5,8 @@ key, so it grew one entry per unique query for the life of the process (a slow
 memory leak on a long-running server). It's now a bounded LRU + TTL cache.
 """
 
+import pytest
+
 import server.fetcher.fetcher as fetcher
 from server.cache.rec_cache import TTLCache
 
@@ -199,6 +201,92 @@ def test_first_sentence_still_wins_over_the_fallback():
     }
     book = fetcher.Fetcher._from_openlib_doc(doc)
     assert book.description == "It was a bright cold day in April."
+
+
+# --------------------------------------------------------------- credentials
+# The Google Books key is passed as a query parameter, and requests quotes the
+# full URL in its exception messages. app.py logs those with exc_info=True, so
+# before this an ordinary 503 wrote the key into the container log and into any
+# traceback pasted into a terminal or a chat.
+
+import requests as _real_requests  # noqa: E402
+
+
+def test_redact_masks_credential_query_params():
+    url = "https://www.googleapis.com/books/v1/volumes?q=dune&key=not-a-real-key-fixture"
+    out = fetcher.redact_secrets(f"503 Server Error for url: {url}")
+    assert "not-a-real-key-fixture" not in out
+    assert "key=REDACTED" in out
+    assert "q=dune" in out  # only credentials are masked
+
+
+@pytest.mark.parametrize("param", ["key", "api_key", "apikey", "access_token",
+                                   "token", "password"])
+def test_redact_covers_the_usual_credential_names(param):
+    out = fetcher.redact_secrets(f"https://x/y?a=1&{param}=SECRETVALUE")
+    assert "SECRETVALUE" not in out
+
+
+def test_http_error_message_has_no_key(monkeypatch):
+    class _Failing(_FakeRequests):
+        def get(self, url, params=None, timeout=None, headers=None):
+            resp = _FakeResp({}, size=0)
+            resp.status_code = 503
+
+            def _raise():
+                raise _real_requests.exceptions.HTTPError(
+                    f"503 Server Error: Service Unavailable for url: "
+                    f"{url}?q=dune&key=not-a-real-key-fixture", response=resp)
+            resp.raise_for_status = _raise
+            return resp
+
+    monkeypatch.setattr(fetcher, "_cache", TTLCache(max_entries=4, ttl_seconds=60,
+                                                    copier=dict))
+    monkeypatch.setattr(fetcher, "requests", _Failing())
+    with pytest.raises(_real_requests.exceptions.HTTPError) as exc:
+        fetcher._get_json("https://www.googleapis.com/books/v1/volumes", {"q": "dune"})
+    assert "not-a-real-key-fixture" not in str(exc.value)
+    assert "REDACTED" in str(exc.value)
+
+
+def test_connection_error_message_has_no_key(monkeypatch):
+    class _Refusing(_FakeRequests):
+        def get(self, url, params=None, timeout=None, headers=None):
+            raise _real_requests.exceptions.ConnectionError(
+                "HTTPSConnectionPool(host='www.googleapis.com', port=443): "
+                "Max retries exceeded with url: /books/v1/volumes?key=not-a-real-key-fixture")
+
+    monkeypatch.setattr(fetcher, "_cache", TTLCache(max_entries=4, ttl_seconds=60,
+                                                    copier=dict))
+    monkeypatch.setattr(fetcher, "requests", _Refusing())
+    with pytest.raises(_real_requests.exceptions.ConnectionError) as exc:
+        fetcher._get_json("https://www.googleapis.com/books/v1/volumes", {"q": "x"})
+    assert "not-a-real-key-fixture" not in str(exc.value)
+
+
+def test_redaction_preserves_the_response_the_429_branch_reads():
+    # _fetch_google_books inspects HTTPError.response.status_code to trip the
+    # cooldown. Redaction rebuilds the exception, so that must survive.
+    resp = _FakeResp({}, size=0)
+    resp.status_code = 429
+    original = _real_requests.exceptions.HTTPError(
+        "429 for url: https://x?key=not-a-real-key-fixture", response=resp)
+    with pytest.raises(_real_requests.exceptions.HTTPError) as exc:
+        fetcher._reraise_redacted(original)
+    assert exc.value.response is resp
+    assert exc.value.response.status_code == 429
+    assert "not-a-real-key-fixture" not in str(exc.value)
+
+
+def test_redaction_does_not_chain_the_unredacted_original():
+    # `raise ... from None` matters: a chained cause prints the original
+    # message, key and all, directly beneath the redacted one.
+    original = _real_requests.exceptions.HTTPError("boom key=not-a-real-key-fixture")
+    try:
+        fetcher._reraise_redacted(original)
+    except _real_requests.exceptions.HTTPError as raised:
+        assert raised.__cause__ is None
+        assert raised.__suppress_context__ is True
 
 
 # ---------------------------------------------------------------- politeness

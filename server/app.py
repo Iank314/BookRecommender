@@ -606,6 +606,29 @@ def _names_same_work(cand_key: str, src_key: str) -> bool:
     return cand_key.startswith(src_key + " ")
 
 
+# Character-length proxy for "this description is boilerplate". Kept because
+# several older gates are calibrated on it, but prefer _has_usable_text below:
+# length is demonstrably the wrong measure — see its docstring.
+MIN_USABLE_DESC = 60
+
+
+def _has_usable_text(text: str) -> bool:
+    """Whether a description actually says anything about the book.
+
+    Counting characters does not answer this, and the failure is not
+    hypothetical: "First published in 2012. | By Brandon Sanderson, Alex
+    Flagg, Patrick Kapera." is 76 characters — comfortably past any sane
+    length bar — and tokenises to six author surnames. Open Library's
+    synthesised fallback grows with the author list, so the boilerplate gets
+    *longer* exactly when it stays equally uninformative.
+
+    Deliberately the same test `_score_similar_candidates` applies via
+    `source_has_text`, so "sparse enough to enrich" and "too sparse to score
+    on" cannot drift apart.
+    """
+    return len(_tokenize(text)) >= _MIN_SOURCE_TEXT_TOKENS
+
+
 def _enrich_source_by_title_lookup(source: Books) -> None:
     """Last-resort source enrichment: find the same book in either provider by
     title and borrow the richest record's tags + description. Saves sparse
@@ -625,6 +648,7 @@ def _enrich_source_by_title_lookup(source: Books) -> None:
     best_tags: list[str] = []
     best_tags_have_genre = False
     best_desc = ""
+    best_ol_key = ""  # work key of a matching OL sibling, for the detail fetch
     for fetch in (_gb, _ol):
         try:
             results = fetch()
@@ -639,6 +663,8 @@ def _enrich_source_by_title_lookup(source: Books) -> None:
                     continue  # same title, different book
             if len(cand.description) > len(best_desc):
                 best_desc = cand.description
+            if not best_ol_key and cand.id.startswith("ol_/works/"):
+                best_ol_key = cand.id[len("ol_"):]
             # Prefer a sibling that names an actual genre. Taking the first
             # tagged record found borrowed "Children's stories" from another
             # audience-only edition and left the source no better off.
@@ -648,8 +674,33 @@ def _enrich_source_by_title_lookup(source: Books) -> None:
                     best_tags, best_tags_have_genre = cand.tags, True
                 elif not best_tags:
                     best_tags = cand.tags
-        if best_tags_have_genre and len(best_desc) >= 60:
+        if best_tags_have_genre and _has_usable_text(best_desc):
             break  # rich enough, skip the second provider
+
+    # Open Library *search* records carry `first_sentence` at best, and usually
+    # not even that — the real blurb lives on the work record, one fetch away.
+    # Without this step a source that resolved to a Google Books id (so
+    # _ensure_details' work-detail path never applies) and then met a GB outage
+    # has no route to a description at all. Measured on Mistborn: every OL
+    # search sibling topped out at 76 characters of "First published in 2012. |
+    # By Brandon Sanderson", while the work record holds 1436.
+    #
+    # That is not a cosmetic loss. A source with no usable text makes genre
+    # 100% of the score instead of 34%, and genre is effectively binary — so
+    # every fantasy book in the pool ties at exactly the same score and the
+    # ranking collapses to a ±5% popularity nudge. In production it returned
+    # 1654 results led by Le Petit Prince. One extra request buys the signal
+    # that the whole ranking depends on.
+    if best_ol_key and not _has_usable_text(best_desc):
+        detail_desc, detail_subjects = Fetcher(
+            source=OPENLIB_ENDPOINT).fetch_work_detail(best_ol_key)
+        if len(detail_desc) > len(best_desc):
+            best_desc = detail_desc
+        if detail_subjects and not best_tags_have_genre:
+            if _real_genres(set(_genre_atoms(detail_subjects)[0])):
+                best_tags, best_tags_have_genre = detail_subjects[:5], True
+            elif not best_tags:
+                best_tags = detail_subjects[:5]
 
     # Borrow tags when the source has none *or* when the ones it has name no
     # genre. Searching "Harry potter" returns one record tagged only
@@ -686,7 +737,7 @@ def _gather_similar_candidates(
     # --- 0) Enrich a sparse source before anything keys off its tags/text ---
     # _ensure_details back-fills genres + the full description for Open
     # Library works; the genre queries below and the scorer both depend on it.
-    if not source_book.tags or len(source_book.description) < 60:
+    if not source_book.tags or len(source_book.description) < MIN_USABLE_DESC:
         try:
             _ensure_details(source_book)
         except Exception:
@@ -700,7 +751,7 @@ def _gather_similar_candidates(
     # kind of book it is, and a sibling record for the same title says
     # "Fantasy". Skipping enrichment there is what left Find Similar on Harry
     # Potter returning a single Enid Blyton title.
-    if (not source_book.tags or len(source_book.description) < 60
+    if (not source_book.tags or len(source_book.description) < MIN_USABLE_DESC
             or not _real_genres(set(_genre_atoms(source_book.tags)[0]))):
         try:
             _enrich_source_by_title_lookup(source_book)
@@ -2824,7 +2875,8 @@ def _ensure_details(book: Books) -> bool:
             changed = True
     book.metadata = meta
 
-    if book.id.startswith("ol_/works/") and (not book.tags or len(book.description) < 60):
+    if book.id.startswith("ol_/works/") and (
+            not book.tags or len(book.description) < MIN_USABLE_DESC):
         desc, subjects = Fetcher(source=OPENLIB_ENDPOINT).fetch_work_detail(
             book.id[len("ol_"):])
         if _apply_work_detail(book, desc, subjects):

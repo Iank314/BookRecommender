@@ -14,8 +14,12 @@ from typing import List, Optional
 
 try:
     import requests  # type: ignore
+    # Bound at import so redaction still works when a test monkeypatches
+    # `requests` on this module with a stub that has no `.exceptions`.
+    from requests import exceptions as _requests_exc  # type: ignore
 except ImportError:  # pragma: no cover
     requests = None
+    _requests_exc = None
 
 from server.cache.rec_cache import TTLCache
 from server.models.book import Books
@@ -162,6 +166,41 @@ def _set_gb_cooldown() -> None:
         _gb_cooldown_until = time.time() + _GB_COOLDOWN_SECONDS
 
 
+# Credentials in a query string. requests quotes the full request URL in its
+# exception messages -- "503 Server Error: ... for url: https://...&key=AIza..."
+# for an HTTPError, and "Max retries exceeded with url: /v1?key=AIza..." for a
+# ConnectionError. app.py logs those with exc_info=True, so one provider outage
+# writes the Google Books API key into the container log, and into any
+# traceback that gets pasted into a terminal, an issue or a chat.
+_SECRET_QS_RE = re.compile(
+    r"(?i)([?&](?:key|api[_-]?key|access[_-]?token|token|password)=)[^&\s\"']+"
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Mask credential query parameters in an arbitrary string."""
+    return _SECRET_QS_RE.sub(r"\1REDACTED", text)
+
+
+def _reraise_redacted(exc: Exception):
+    """Re-raise a requests exception with credentials stripped from its message.
+
+    Keeps the original type where it can: callers branch on it, notably
+    _fetch_google_books checking HTTPError.response.status_code for 429.
+    `from None` drops the original from the chain -- leaving it would print the
+    unredacted message directly beneath the redacted one.
+    """
+    message = redact_secrets(str(exc))
+    response = getattr(exc, "response", None)
+    request = getattr(exc, "request", None)
+    try:
+        clean = type(exc)(message, response=response, request=request)
+    except TypeError:  # an exception with a different constructor
+        clean = _requests_exc.RequestException(message)
+        clean.response, clean.request = response, request
+    raise clean from None
+
+
 def _cache_key(url: str, params: dict | None) -> str:
     items = sorted((params or {}).items())
     return url + "?" + "&".join(f"{k}={v}" for k, v in items)
@@ -183,6 +222,9 @@ def _get_json(url: str, params: dict | None, *,
         try:
             resp = requests.get(url, params=params, timeout=_HTTP_TIMEOUT,
                                 headers=_HEADERS)
+        except _requests_exc.RequestException as exc:
+            # Connection/timeout errors quote the URL too, not just HTTP errors.
+            _reraise_redacted(exc)
         finally:
             if semaphore is not None:
                 semaphore.release()
@@ -195,7 +237,10 @@ def _get_json(url: str, params: dict | None, *,
             time.sleep(min(wait, 5.0))
             attempt += 1
             continue
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except _requests_exc.HTTPError as exc:
+            _reraise_redacted(exc)
         data = resp.json()
         # Weigh the entry by the raw body length: exact, already measured by
         # requests, and far cheaper than re-serialising the decoded object.
