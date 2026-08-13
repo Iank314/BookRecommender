@@ -5,11 +5,20 @@ from __future__ import annotations
 import hashlib
 import secrets
 import sqlite3
+import time
 
 from server.storage._base import SQLiteStore
 
 # PBKDF2 cost. High enough to slow brute force, cheap enough for a login request.
 _PBKDF2_ROUNDS = 200_000
+
+# Server-side session lifetime. This is the one that matters: a cookie's
+# max_age is a request to the browser, not a constraint on us, so without a
+# check here a token copied off a machine stays valid forever and "log out
+# everywhere" only exists as a side effect of a password reset. Matched to the
+# cookie's 1-year max_age (COOKIE_MAX_AGE in app.py) so the two expire
+# together — a session the browser has already dropped is dead weight anyway.
+SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 365
 
 
 class UsernameTakenError(Exception):
@@ -154,13 +163,45 @@ class UserStore(SQLiteStore):
             )
         return token
 
-    def user_for_session(self, token: str) -> str | None:
+    def user_for_session(self, token: str, now: int | None = None) -> str | None:
+        """Resolve a session token, or None if it's unknown or expired.
+
+        The expiry is enforced here rather than left to the cookie, because a
+        token that has escaped the browser it was issued to is exactly the case
+        the cookie's max_age cannot cover. Expired rows are left for
+        prune_sessions to sweep — deleting on a read path would turn every
+        page load into a write.
+        """
+        cutoff = (now if now is not None else int(time.time())) - SESSION_MAX_AGE_SECONDS
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT user_id FROM sessions WHERE token = ?", (token,)
+                "SELECT user_id FROM sessions WHERE token = ? AND created_at >= ?",
+                (token, cutoff),
             ).fetchone()
         return row["user_id"] if row else None
 
     def delete_session(self, token: str) -> None:
         with self._connect() as conn:
             conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+
+    def prune_sessions(self, now: int | None = None) -> int:
+        """Delete expired sessions; return the number removed.
+
+        Expiry is already enforced on read, so this only reclaims disk — but
+        the table is insert-only apart from logout, and every login adds a row
+        that nothing else ever removes.
+        """
+        cutoff = (now if now is not None else int(time.time())) - SESSION_MAX_AGE_SECONDS
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM sessions WHERE created_at < ?", (cutoff,))
+            return cur.rowcount
+
+    def count_expired_sessions(self, now: int | None = None) -> int:
+        """Expired sessions still on disk — backs the --dry-run preview, using
+        the same predicate prune_sessions deletes on so the two can't drift."""
+        cutoff = (now if now is not None else int(time.time())) - SESSION_MAX_AGE_SECONDS
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE created_at < ?", (cutoff,)
+            ).fetchone()
+        return row[0]

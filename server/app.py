@@ -39,6 +39,7 @@ from server.fetcher.fetcher import (
     Fetcher,
     GOOGLE_ENDPOINT,
     OPENLIB_ENDPOINT,
+    cache_bytes as fetcher_cache_bytes,
     cache_size as fetcher_cache_size,
 )
 from server.models.book import Books
@@ -90,7 +91,14 @@ SESSION_COOKIE_SECURE = _env_flag("BOOKREC_SECURE_COOKIES")
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 logger = logging.getLogger(__name__)
-NonEmptyStr = constr(strip_whitespace=True, min_length=1)
+# Upper bounds exist because /search and /similar take no authentication and
+# their text drives tokenisation and scoring — without a ceiling, body size is
+# free CPU for anyone who asks. The limits are far above any real input: the
+# longest sensible search query is a title plus subtitle, and a book blurb
+# that won't fit in 8000 characters isn't a blurb.
+NonEmptyStr = constr(strip_whitespace=True, min_length=1, max_length=300)
+ShortStr = constr(strip_whitespace=True, max_length=300)
+BlurbStr = constr(max_length=8_000)
 Username = constr(strip_whitespace=True, min_length=2, max_length=32)
 Password = constr(min_length=6, max_length=128)
 Category = Literal["title", "author", "genre", "general"]
@@ -485,11 +493,13 @@ class SimilarRequest(BaseModel):
     # work id lets us back-fill genres + a real description before scoring.
     # Sparse OL records ("First published in 2005", no tags) otherwise match
     # candidates on publication boilerplate instead of story content.
-    id: str = ""
-    title: str
-    authors: list[str] = Field(default_factory=list)
-    description: str = ""
-    tags: list[str] = Field(default_factory=list)
+    id: ShortStr = ""
+    # Bounded, not made non-empty: this is a length ceiling, and adding a new
+    # rejection case is a behaviour change the frontend didn't ask for.
+    title: ShortStr
+    authors: list[ShortStr] = Field(default_factory=list, max_length=20)
+    description: BlurbStr = ""
+    tags: list[ShortStr] = Field(default_factory=list, max_length=50)
     top_n: int = Field(20, ge=1, le=50)
 
 
@@ -1877,6 +1887,10 @@ def admin_stats(user_id: str = Depends(get_admin_user_id)):
             "recommendation": len(rec_cache),
             "similar": len(similar_cache),
             "fetcher": fetcher_cache_size(),
+            # Entry counts don't track memory for the fetcher — its payloads
+            # range from a few KB to ~780KB. This is the number to read
+            # against RSS.
+            "fetcher_mb": round(fetcher_cache_bytes() / (1024 * 1024), 1),
         },
         # Process memory in MiB (Linux prod only; empty on Windows dev).
         "memory": _process_memory(),
@@ -1887,11 +1901,13 @@ def admin_stats(user_id: str = Depends(get_admin_user_id)):
 # Personal Library — save, list, remove, get recommendations
 # ------------------------------------------------------------------ #
 class SaveBookRequest(BaseModel):
-    id: str
-    title: str
-    authors: list[str] = Field(default_factory=list)
-    description: str = ""
-    tags: list[str] = Field(default_factory=list)
+    # Bounded like the anonymous endpoints: these land in SQLite as JSON, so
+    # an unbounded field is unbounded disk per account rather than free CPU.
+    id: ShortStr
+    title: ShortStr
+    authors: list[ShortStr] = Field(default_factory=list, max_length=20)
+    description: BlurbStr = ""
+    tags: list[ShortStr] = Field(default_factory=list, max_length=50)
     metadata: dict = Field(default_factory=dict)
 
 
@@ -2032,12 +2048,12 @@ def sections_remove_book(
 # Feedback — thumbs up / thumbs down signals for the recommender
 # ------------------------------------------------------------------ #
 class FeedbackRequest(BaseModel):
-    id: str
-    title: str
+    id: ShortStr
+    title: ShortStr
     kind: FeedbackKind
-    authors: list[str] = Field(default_factory=list)
-    description: str = ""
-    tags: list[str] = Field(default_factory=list)
+    authors: list[ShortStr] = Field(default_factory=list, max_length=20)
+    description: BlurbStr = ""
+    tags: list[ShortStr] = Field(default_factory=list, max_length=50)
     metadata: dict = Field(default_factory=dict)
 
 

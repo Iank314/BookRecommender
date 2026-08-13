@@ -120,6 +120,13 @@ class TTLCache:
     (a cached dict's inner lists, a cached list's inner dicts) stay shared, so
     callers must treat anything below the top level as read-only. Pass a value
     whose type matches the copier.
+
+    `max_bytes` adds a second, independent ceiling. An entry cap alone bounds
+    memory only when entries are roughly the same size, and the fetcher's
+    aren't: one Open Library search response at limit=1000 is megabytes, while
+    a work-detail lookup is a few KB. 512 of the former is gigabytes — the cap
+    reads like a bound and isn't one. Callers pass a per-entry `weight` (the
+    raw response length) and eviction runs until both ceilings are satisfied.
     """
 
     def __init__(
@@ -128,34 +135,59 @@ class TTLCache:
         ttl_seconds: float = 3600.0,
         clock=time.monotonic,
         copier: Callable[[Any], Any] = list,
+        max_bytes: int | None = None,
     ) -> None:
-        self._store: OrderedDict[str, tuple[float, Any]] = OrderedDict()
+        # value tuples are (expires_at, value, weight)
+        self._store: OrderedDict[str, tuple[float, Any, int]] = OrderedDict()
         self._lock = Lock()
         self._max = max_entries
+        self._max_bytes = max_bytes
+        self._bytes = 0
         self._ttl = ttl_seconds
         self._clock = clock
         self._copy = copier
+
+    def _drop_locked(self, key: str) -> None:
+        """Remove one entry, keeping the byte total in step. Caller holds lock."""
+        self._bytes -= self._store.pop(key)[2]
 
     def get(self, key: str) -> Any | None:
         with self._lock:
             entry = self._store.get(key)
             if entry is None:
                 return None
-            expires_at, value = entry
+            expires_at, value, _ = entry
             if self._clock() >= expires_at:
-                del self._store[key]
+                self._drop_locked(key)
                 return None
             self._store.move_to_end(key)
             return self._copy(value)
 
-    def put(self, key: str, value: Any) -> None:
+    def put(self, key: str, value: Any, weight: int = 0) -> None:
         with self._lock:
-            self._store[key] = (self._clock() + self._ttl, self._copy(value))
+            if key in self._store:
+                self._drop_locked(key)  # replacing: don't double-count
+            self._store[key] = (self._clock() + self._ttl, self._copy(value), weight)
+            self._bytes += weight
             self._store.move_to_end(key)
-            while len(self._store) > self._max:
-                self._store.popitem(last=False)
+            # `len(self._store) > 1` keeps a single oversized entry cached
+            # rather than evicting it into an empty cache and re-fetching it
+            # every time — one entry over budget beats a permanent cache miss.
+            while self._store and (
+                len(self._store) > self._max
+                or (self._max_bytes is not None
+                    and self._bytes > self._max_bytes
+                    and len(self._store) > 1)
+            ):
+                self._drop_locked(next(iter(self._store)))
 
     def __len__(self) -> int:
         """Current entry count — surfaced in /admin/stats for leak-watching."""
         with self._lock:
             return len(self._store)
+
+    def nbytes(self) -> int:
+        """Total weight of cached entries — the number that actually tracks
+        memory, since entry count doesn't when payload sizes vary."""
+        with self._lock:
+            return self._bytes

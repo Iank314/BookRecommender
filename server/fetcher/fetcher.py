@@ -56,9 +56,44 @@ _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 # dict would grow one entry per unique query for the life of the process — a slow
 # leak on a long-running server. The cap makes it evict instead. `copier=dict`
 # shallow-copies the decoded JSON on the way in/out.
+#
+# The entry cap is NOT a memory bound on its own: entries here range from a few
+# KB (a work-detail lookup) to ~780KB (an OL search at limit=1000 — measured at
+# ~780 bytes/doc), so 512 of the large kind is ~400MB on a box with 512MB-2GB.
+# `max_bytes` is the ceiling that actually holds; the entry cap stays as a cheap
+# guard on small responses.
 _CACHE_TTL = 600.0  # seconds
 _CACHE_MAX_ENTRIES = 512
-_cache = TTLCache(max_entries=_CACHE_MAX_ENTRIES, ttl_seconds=_CACHE_TTL, copier=dict)
+_CACHE_MAX_BYTES = 64 * 1024 * 1024  # 64 MiB of raw response bodies
+_cache = TTLCache(
+    max_entries=_CACHE_MAX_ENTRIES,
+    ttl_seconds=_CACHE_TTL,
+    copier=dict,
+    max_bytes=_CACHE_MAX_BYTES,
+)
+
+# Exactly the Open Library search fields _from_openlib_doc reads.
+#
+# This is a correctness fix, not an optimisation. OL's search.json returns a
+# fixed 14-field default document that does NOT include `subject`,
+# `first_sentence`, or any of the ratings/reading counts — they are opt-in via
+# `fields`, and asking costs nothing (measured: 748 bytes/doc default vs 783
+# with subjects and first sentences). Without this parameter every one of the
+# 700-1000 records a genre query returns arrived with tags=[] and a
+# description of "First published in 1974. | By Joe Abercrombie." — which is
+# precisely the "sparse OL record" the enrichment paths, the genre-inference
+# fallbacks and the per-book fetch_work_detail lookups all exist to work
+# around. The scorer was reading fields the request never asked for.
+#
+# Consequence to remember: this materially changes what /library/recommend and
+# /similar score against, and the popularity signals (ratings_count,
+# want_to_read_count) go from a constant 0 for every OL book to real values.
+# Keep in step with _from_openlib_doc.
+_OL_SEARCH_FIELDS = ",".join((
+    "key", "title", "subtitle", "author_name", "subject", "first_sentence",
+    "first_publish_year", "edition_count", "ratings_average", "ratings_count",
+    "want_to_read_count", "already_read_count", "language", "cover_i",
+))
 
 
 # Open Library's `description` and `first_sentence` fields are community-editable,
@@ -93,6 +128,15 @@ def _looks_like_reader_note(text: str) -> bool:
 def cache_size() -> int:
     """Live entry count of the response cache — surfaced in /admin/stats."""
     return len(_cache)
+
+
+def cache_bytes() -> int:
+    """Raw response bytes held by the cache — surfaced in /admin/stats.
+
+    The count above can sit flat while this climbs, because entry sizes here
+    span three orders of magnitude. This is the one to watch against RSS.
+    """
+    return _cache.nbytes()
 
 # Cap concurrent Google Books requests. Unauthenticated Google has a very low
 # per-IP limit, and we fan genre queries out across a thread pool; without this
@@ -153,7 +197,9 @@ def _get_json(url: str, params: dict | None, *,
             continue
         resp.raise_for_status()
         data = resp.json()
-        _cache.put(key, data)
+        # Weigh the entry by the raw body length: exact, already measured by
+        # requests, and far cheaper than re-serialising the decoded object.
+        _cache.put(key, data, weight=len(resp.content))
         return data
 
 
@@ -314,14 +360,15 @@ class Fetcher:
         if requests is None:  # pragma: no cover
             raise ImportError("Install `requests` to use Open Library fetching.")
 
-        if category == "title":
-            params = {"title": query, "limit": max_results, "offset": offset}
-        elif category == "author":
-            params = {"author": query, "limit": max_results, "offset": offset}
-        elif category == "genre":
-            params = {"subject": query, "limit": max_results, "offset": offset}
-        else:
-            params = {"q": query, "limit": max_results, "offset": offset}
+        field = {"title": "title", "author": "author", "genre": "subject"}.get(
+            category, "q"
+        )
+        params = {
+            field: query,
+            "limit": max_results,
+            "offset": offset,
+            "fields": _OL_SEARCH_FIELDS,
+        }
 
         data = _get_json(OPENLIB_ENDPOINT, params,
                          semaphore=_OL_SEMAPHORE, retries=1)
