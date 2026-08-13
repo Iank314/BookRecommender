@@ -2,12 +2,13 @@
 and the /admin/stats gate."""
 
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
 
 from server.storage.activity_db import ActivityStore
-from server.storage.users_db import UserStore
+from server.storage.users_db import SESSION_MAX_AGE_SECONDS, UserStore
 
 
 @pytest.fixture
@@ -109,6 +110,62 @@ def test_set_password_case_insensitive_username(users: UserStore):
     uid = users.create_user("Max_Ku", OLD_PW)
     assert users.set_password("max_ku", NEW_PW) is True
     assert users.verify_credentials("Max_Ku", NEW_PW) == uid
+
+
+# ---- session expiry ----------------------------------------------------------
+
+def test_fresh_session_resolves(users: UserStore):
+    uid = users.create_user("alice", OLD_PW)
+    assert users.user_for_session(users.create_session(uid)) == uid
+
+
+def test_expired_session_is_rejected(users: UserStore):
+    """The cookie's max_age is a request to the browser, not a constraint on us.
+
+    Without a server-side check a token that escaped the browser it was issued
+    to stays valid forever — which is precisely the case the cookie cannot
+    cover.
+    """
+    uid = users.create_user("alice", OLD_PW)
+    token = users.create_session(uid)
+    later = int(time.time()) + SESSION_MAX_AGE_SECONDS + 1
+    assert users.user_for_session(token, now=later) is None
+
+
+def test_session_valid_right_up_to_the_boundary(users: UserStore):
+    uid = users.create_user("alice", OLD_PW)
+    token = users.create_session(uid)
+    edge = int(time.time()) + SESSION_MAX_AGE_SECONDS
+    assert users.user_for_session(token, now=edge) == uid
+
+
+def test_prune_removes_only_expired_sessions(users: UserStore):
+    uid = users.create_user("alice", OLD_PW)
+    old = users.create_session(uid)
+    fresh = users.create_session(uid)
+    # Backdate one session past the expiry.
+    with sqlite3.connect(users.db_path) as conn:
+        conn.execute(
+            "UPDATE sessions SET created_at = created_at - ? WHERE token = ?",
+            (SESSION_MAX_AGE_SECONDS + 10, old),
+        )
+
+    assert users.count_expired_sessions() == 1
+    assert users.prune_sessions() == 1
+    assert users.user_for_session(fresh) == uid
+    assert users.user_for_session(old) is None
+
+
+def test_prune_and_dry_run_agree(users: UserStore):
+    # The preview must use the same predicate as the delete, or the operator
+    # is told one number and gets another.
+    uid = users.create_user("alice", OLD_PW)
+    for _ in range(3):
+        users.create_session(uid)
+    with sqlite3.connect(users.db_path) as conn:
+        conn.execute("UPDATE sessions SET created_at = created_at - ?",
+                     (SESSION_MAX_AGE_SECONDS + 10,))
+    assert users.count_expired_sessions() == users.prune_sessions() == 3
 
 
 # ---- activity log ------------------------------------------------------------

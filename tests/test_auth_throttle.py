@@ -74,3 +74,52 @@ def test_pruning_empties_the_internal_entry():
     clock.now += 61.0
     t.is_allowed("attacker")  # triggers prune
     assert "attacker" not in t._fails
+
+
+def test_many_usernames_do_not_accumulate_forever():
+    """The above only prunes the name being checked, which isn't a bound.
+
+    Usernames come from an unauthenticated request body, so they are
+    attacker-controlled keys: spraying one bad password across distinct names
+    grew the dict one entry per name and nothing ever removed them, because a
+    name attacked once is never checked again.
+    """
+    clock = FakeClock()
+    t = LoginThrottle(max_attempts=3, window_seconds=60.0, time_fn=clock)
+    for i in range(5_000):
+        name = f"victim{i}"
+        t.is_allowed(name)
+        t.record_failure(name)
+    assert len(t._fails) == 5_000  # all still live, within the window
+
+    # One window later, a single unrelated attempt sweeps every aged entry.
+    clock.now += 61.0
+    t.is_allowed("someone-else")
+    assert len(t._fails) == 0
+
+
+def test_sweep_keeps_live_entries():
+    # The sweep must not hand an attacker a reset: names still inside the
+    # window survive it, blocked ones stay blocked.
+    clock = FakeClock()
+    t = LoginThrottle(max_attempts=3, window_seconds=60.0, time_fn=clock)
+    for _ in range(3):
+        t.record_failure("old")
+    clock.now += 61.0
+    for _ in range(3):
+        t.record_failure("fresh")
+    t.is_allowed("trigger")  # sweeps
+
+    assert "old" not in t._fails      # aged out
+    assert "fresh" in t._fails        # still live
+    assert t.is_allowed("fresh") is False
+
+
+def test_repeated_failures_on_one_name_stay_bounded():
+    # Only the newest `max_attempts` timestamps can change the verdict, so a
+    # single name hammered between sweeps must not grow without bound either.
+    t = LoginThrottle(max_attempts=3, window_seconds=60.0)
+    for _ in range(1_000):
+        t.record_failure("alice")
+    assert len(t._fails["alice"]) == 3
+    assert t.is_allowed("alice") is False
