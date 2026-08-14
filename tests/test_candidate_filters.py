@@ -394,3 +394,70 @@ def test_a_prefix_must_land_on_a_word_boundary():
     # "the hobbits" is a different work from "the hobbit".
     assert not _names_same_work("the hobbits of the shire", "the hobbit")
     assert _names_same_work("the hobbit there and back again", "the hobbit")
+
+
+def test_a_companion_volume_is_not_the_same_work():
+    """A book *about* a book prefix-matches it perfectly.
+
+    "The Hunger Games and Philosophy" starts with "the hunger games", so the
+    sibling rule accepted it and the novel borrowed its `philosophy` tags —
+    Find Similar on The Hunger Games returned Kant, Nietzsche and Lenin.
+    """
+    from server.app import _names_same_work
+
+    src = "the hunger games"
+    for companion in ("the hunger games and philosophy",
+                      "the hunger games companion",
+                      "the hunger games study guide",
+                      "the hunger games sparknotes",
+                      "the hunger games summary and analysis",
+                      "the hunger games unofficial cookbook"):
+        assert not _names_same_work(companion, src), companion
+
+
+def test_the_companion_guard_only_inspects_the_added_words():
+    # Someone whose source genuinely is a study guide must still be able to
+    # enrich from another copy of that same study guide.
+    from server.app import _names_same_work
+
+    guide = "the hunger games study guide"
+    assert _names_same_work(guide, guide)
+    # And a real edition is still a sibling.
+    assert _names_same_work("the hunger games trilogy boxset", "the hunger games")
+
+
+def test_prefix_siblings_need_agreeing_authors(monkeypatch):
+    """A longer title is only the same work if the authors positively agree.
+
+    An exact title match can be taken on trust; a longer one cannot, because
+    that is the shape of a companion, a sequel, or an unrelated book that
+    happens to start the same way. The Hunger Games arrived from /search with
+    no author, so nothing contradicted the companion volume.
+    """
+    import server.app as app
+    from server.models.book import Books
+
+    sibling = Books(id="ol_/works/OL9W", title="The Hunger Games And The Sequel",
+                    authors=["Suzanne Collins"], description="x" * 200,
+                    tags=["Dystopian"], metadata={})
+
+    class _FakeFetcher:
+        def __init__(self, source=None, **kw): pass
+        def fetch_google_page(self, *a, **k): return [], 0
+        def fetch_page(self, *a, **k): return [sibling], 1
+        def fetch_work_detail(self, key): return ("", [])
+
+    monkeypatch.setattr(app, "Fetcher", _FakeFetcher)
+
+    # Authorless source: the longer-titled sibling must be refused.
+    anon = Books(id="ol_/works/OL1W", title="The Hunger Games", authors=[],
+                 description="", tags=["Contests"], metadata={})
+    app._enrich_source_by_title_lookup(anon)
+    assert "Dystopian" not in anon.tags
+
+    # Same source with its author known: now the sibling is trusted.
+    named = Books(id="ol_/works/OL1W", title="The Hunger Games",
+                  authors=["Suzanne Collins"], description="", tags=["Contests"],
+                  metadata={})
+    app._enrich_source_by_title_lookup(named)
+    assert "Dystopian" in named.tags

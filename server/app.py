@@ -587,6 +587,18 @@ def _squash_author(name: str) -> str:
     return re.sub(r"[^a-z]", "", name.lower())
 
 
+# Words that, appended to a title, mean the result is a book *about* that book
+# rather than an edition of it. Only ever tested against the suffix a candidate
+# adds to the source's title, so an exact-title match is unaffected — someone
+# whose source really is a study guide can still enrich from other copies of it.
+_COMPANION_TITLE_RE = re.compile(
+    r"\b(and philosophy|companion|study guide|studyguide|sparknotes|"
+    r"cliffs ?notes|summary|summaries|analysis|synopsis|unofficial|"
+    r"quiz|trivia|coloring book|cookbook|handbook|teachers? guide|"
+    r"lesson plans?|literature guide|discussion questions)\b"
+)
+
+
 def _names_same_work(cand_key: str, src_key: str) -> bool:
     """Whether a candidate title plausibly names the same work as the source.
 
@@ -603,7 +615,14 @@ def _names_same_work(cand_key: str, src_key: str) -> bool:
         return True
     if len(src_key) < 8:
         return False
-    return cand_key.startswith(src_key + " ")
+    if not cand_key.startswith(src_key + " "):
+        return False
+    # The added words must not turn it into a book *about* the source. A
+    # companion volume prefix-matches its subject perfectly — "The Hunger
+    # Games and Philosophy" starts with "the hunger games" — but its subject
+    # tags are its own, and borrowing them retagged the novel as philosophy
+    # and returned Kant, Nietzsche and Lenin from Find Similar.
+    return not _COMPANION_TITLE_RE.search(cand_key[len(src_key):])
 
 
 # Character-length proxy for "this description is boilerplate". Kept because
@@ -655,12 +674,24 @@ def _enrich_source_by_title_lookup(source: Books) -> None:
         except Exception:
             continue
         for cand in results:
-            if not _names_same_work(_split_series(cand.title)[0], skey):
+            cand_key = _split_series(cand.title)[0]
+            if not _names_same_work(cand_key, skey):
                 continue
-            if src_authors:
-                cand_authors = {_squash_author(a) for a in cand.authors if a}
-                if cand_authors and not (src_authors & cand_authors):
-                    continue  # same title, different book
+            cand_authors = {_squash_author(a) for a in cand.authors if a}
+            authors_agree = bool(src_authors and cand_authors
+                                 and src_authors & cand_authors)
+            if src_authors and cand_authors and not authors_agree:
+                continue  # same title, different book
+            # A sibling that *adds* words to the title is only the same work
+            # if the authors positively agree. An exact-title match can be
+            # taken on trust; a longer one cannot, because that is precisely
+            # the shape of a companion, a sequel or an unrelated book that
+            # happens to start the same way. The Hunger Games arrived from
+            # /search with no author at all, so there was nothing to
+            # contradict "The Hunger Games and Philosophy" and the novel got
+            # retagged as philosophy.
+            if cand_key != skey and not authors_agree:
+                continue
             if len(cand.description) > len(best_desc):
                 best_desc = cand.description
             if not best_ol_key and cand.id.startswith("ol_/works/"):
@@ -2174,6 +2205,12 @@ def library_remove(book_id: str, user_id: str = Depends(get_current_user_id)):
 # "fantasy", which _FICTION_GENRE_WORDS still recognises). Extend as bad recs
 # surface new aliases (scripts/explain_similar.py shows each book's atoms).
 _GENRE_SYNONYMS = {
+    # As a shelf label these name the same thing. Folding them here rather
+    # than relating them in _GENRE_PARENTS matters: a parent edge would leave
+    # two atoms where there is one idea, and both would then match a single
+    # candidate tag — which is exactly how a Jude Deveraux romance came to
+    # score identically to a gothic horror on the Mexican Gothic page.
+    "historical": "historical fiction",
     "sci-fi": "science fiction",
     "sci fi": "science fiction",
     "scifi": "science fiction",
@@ -2469,9 +2506,48 @@ _GENRE_PARENTS: dict[str, tuple[str, ...]] = {
     "contemporary romance": ("romance",),
     "historical romance": ("romance", "historical fiction"),
     "romantic suspense": ("romance", "thriller"),
-    # Historical
-    "historical": ("historical fiction",),
 }
+
+
+# How much sharing a given genre atom tells you two books are alike.
+#
+# Genre agreement counted atoms, and an atom is not a unit of evidence.
+# Measured on Dungeon Crawler Carl, whose Open Library record carries
+# `litrpg` and (wrongly) `graphic novel`: a LitRPG candidate and a Graphic
+# Classics anthology each matched one of two profile atoms and scored
+# identically, so Edgar Allan Poe collections outranked the book's own
+# sequels. The same shape put Regency romances on Mexican Gothic — matching
+# `historical` counted as much as matching `gothic`.
+#
+# Deliberately a static table rather than corpus IDF. CLAUDE.md's warning
+# holds: candidates are fetched *by* genre, so the genre you care about is
+# common within the pool and IDF weights it down — the opposite of what's
+# wanted. Specificity is a property of the vocabulary, not of the pool, so it
+# is curated here alongside CORE_GENRES and inspectable.
+_GENRE_WEIGHT_DEFAULT = 2.0
+_GENRE_WEIGHTS = {
+    # Broad shelves and formats. True of enormous numbers of books, so sharing
+    # one is weak evidence of similarity.
+    "adventure": 1.0, "action & adventure": 1.0, "classics": 1.0,
+    "literary": 1.0, "historical fiction": 1.0, "epic": 1.0, "drama": 1.0,
+    "humor": 1.0, "short stories": 1.0, "graphic novel": 1.0, "comics": 1.0,
+    "fairy tales": 1.5, "legends": 1.5, "mythology": 1.5, "war": 1.5,
+    "poetry": 1.5, "manga": 1.5, "science": 1.5, "history": 1.5,
+    # Niche and precise. Sharing one of these says a great deal — it is
+    # usually the exact thing a reader means when they ask for "more like
+    # this".
+    "litrpg": 4.0, "gamelit": 4.0, "cyberpunk": 4.0, "space opera": 4.0,
+    "steampunk": 4.0, "cozy mystery": 4.0, "cosmic horror": 4.0,
+    "romantasy": 4.0, "true crime": 4.0, "noir": 4.0, "western": 4.0,
+    "post-apocalyptic": 4.0, "dystopian": 4.0, "epic fantasy": 4.0,
+    "high fantasy": 4.0, "urban fantasy": 4.0, "dark fantasy": 4.0,
+    "magic realism": 4.0, "gothic": 4.0, "science fantasy": 4.0,
+    "spy": 3.0, "detective": 3.0, "erotica": 3.0, "satire": 3.0,
+}
+
+
+def _genre_weight(atom: str) -> float:
+    return _GENRE_WEIGHTS.get(atom, _GENRE_WEIGHT_DEFAULT)
 
 
 def _with_genre_parents(atoms: set[str]) -> set[str]:
@@ -2522,8 +2598,20 @@ def _similar_genre_score(cand_atoms: set[str], profile_atoms: set[str]) -> float
     # correct fantasy match score 0.25 and drops the book's top result from
     # 45% to 21%. Two shared genres is already strong evidence, and demanding
     # more punishes candidates for the source's bad tags.
-    matched = len(_real_genres(_with_genre_parents(cand_atoms)) & profile_genres)
-    coverage = min(matched / min(len(profile_genres), 2), 1.0)
+    #
+    # Weighted by specificity rather than counted, so matching `litrpg` beats
+    # matching `graphic novel`. The bar is the source's two most informative
+    # *stated* genres: parents are matchable but never raise it, or widening a
+    # subgenre to its parent would make the source harder to match and undo
+    # the point of doing so.
+    stated = _real_genres(profile_atoms) or profile_genres
+    ranked = sorted((_genre_weight(a) for a in stated), reverse=True)
+    target = sum(ranked[:2]) or _GENRE_WEIGHT_DEFAULT
+    matched = sum(
+        _genre_weight(a)
+        for a in _real_genres(_with_genre_parents(cand_atoms)) & profile_genres
+    )
+    coverage = min(matched / target, 1.0)
     shares_audience = bool(
         (cand_atoms & _AUDIENCE_ATOMS) & (profile_atoms & _AUDIENCE_ATOMS)
     )

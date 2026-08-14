@@ -386,6 +386,61 @@ def test_exact_matches_are_unchanged_by_subsumption():
         assert _similar_genre_score(atoms, atoms) == pytest.approx(0.85)
 
 
+# ---- genre specificity -------------------------------------------------------
+# Genre agreement used to count atoms, and an atom is not a unit of evidence.
+# Measured on Dungeon Crawler Carl, whose OL record carries `litrpg` and
+# (wrongly) `graphic novel`: a LitRPG candidate and a Graphic Classics
+# anthology each matched one of two profile atoms and scored the same, so
+# Edgar Allan Poe collections outranked the book's own sequels.
+
+def test_a_niche_genre_outweighs_a_broad_one():
+    profile = {"litrpg", "graphic novel"}
+    niche = _similar_genre_score({"litrpg"}, profile)
+    broad = _similar_genre_score({"graphic novel"}, profile)
+    assert niche > broad * 2, f"litrpg {niche:.3f} vs graphic novel {broad:.3f}"
+
+
+def test_matching_every_stated_genre_still_scores_full():
+    profile = {"litrpg", "graphic novel"}
+    assert _similar_genre_score(profile, profile) == pytest.approx(0.85)
+
+
+def test_gothic_outweighs_historical_for_a_gothic_source():
+    # Mexican Gothic returned Regency romances: `historical` counted as much
+    # as `gothic`, and (before `historical` became a synonym of `historical
+    # fiction`) one candidate tag matched two profile atoms.
+    profile = {"gothic", "historical fiction"}
+    romance = _similar_genre_score({"historical fiction", "romance"}, profile)
+    horror = _similar_genre_score({"gothic", "horror"}, profile)
+    assert horror > romance * 2, f"gothic {horror:.3f} vs historical {romance:.3f}"
+
+
+def test_historical_and_historical_fiction_are_one_atom():
+    # Synonyms, not parent/child -- two atoms for one idea let a single
+    # candidate tag match twice and saturate the coverage cap.
+    from server.app import _genre_atoms
+    assert _genre_atoms(["Historical"])[0] == _genre_atoms(["Historical fiction"])[0]
+
+
+@pytest.mark.parametrize("cand,profile,expected", [
+    ({"fantasy"}, {"fantasy"}, 0.85),                       # single-genre source
+    ({"fantasy"}, {"fantasy", "science fiction"}, 0.425),   # one of two
+    ({"high fantasy"}, {"high fantasy"}, 0.85),             # exact subgenre
+    ({"fantasy"}, {"high fantasy"}, 0.425),                 # parent-only
+    ({"romance"}, {"high fantasy"}, 0.0),                   # unrelated
+])
+def test_weighting_does_not_disturb_the_established_cases(cand, profile, expected):
+    # Specificity weighting must not quietly re-tune everything that already
+    # worked -- these are the cases earlier rounds were calibrated on.
+    assert _similar_genre_score(cand, profile) == pytest.approx(expected)
+
+
+def test_an_unknown_genre_gets_the_default_weight():
+    from server.app import _genre_weight, _GENRE_WEIGHT_DEFAULT
+    assert _genre_weight("some-genre-nobody-listed") == _GENRE_WEIGHT_DEFAULT
+    assert _genre_weight("litrpg") > _genre_weight("fantasy") > _genre_weight("epic")
+
+
 # ---- source description recovery ---------------------------------------------
 # A source with no usable description makes genre 100% of the score instead of
 # 34%, and genre is effectively binary — so every book sharing a genre ties at
