@@ -2430,8 +2430,55 @@ _AUDIENCE_ATOMS = frozenset({
     "young adult fiction", "young adult", "picture books", "board books",
     "middle grade", "readers", "children's poetry",
 })
-# How much of the genre signal audience agreement is allowed to account for.
+# Ceiling for genre agreement. Historically a perfect match scored 0.85 and
+# the remaining 0.15 was paid out for sharing an audience shelf; audience is
+# now a penalty (below), so this stays as the ceiling and existing floors keep
+# their meaning — nothing scores higher than it used to.
 _W_AUDIENCE = 0.15
+_GENRE_COVERAGE_MAX = 1.0 - _W_AUDIENCE
+
+# Audience evidence is asymmetric, so it is weighted asymmetrically.
+#
+# Agreement is weak evidence: two books can share "young adult fiction" and
+# have nothing else in common. It earns a nudge, deliberately small enough to
+# be overturned by a real description difference — that is what puts The Lord
+# of the Rings back above Midnight Sun for The Hobbit.
+#
+# Conflict is strong evidence: a picture book is not a recommendation for an
+# adult epic, whatever their shelves share.
+_W_AUDIENCE_BONUS = 0.03
+_W_AUDIENCE_PENALTY = 0.35
+
+
+def _audience_conflict(cand_atoms: set[str], profile_atoms: set[str]) -> bool:
+    """Whether candidate and source are shelved for incompatible audiences.
+
+    Audience used to be a *reward* for agreeing, which made a `young adult
+    fiction` tag worth more than being the actual sequel: The Hobbit ranked
+    Midnight Sun and three Holly Black novels above The Lord of the Rings,
+    purely because LOTR's record carries no YA shelf.
+
+    The flaw is structural, not a weighting mistake. _AUDIENCE_ATOMS lists
+    only juvenile shelves — there is no "adult fiction" atom — so an absent
+    audience tag cannot distinguish an adult book from an uncatalogued one.
+    Rewarding presence therefore pays out for cataloguing luck, and it pays
+    out at 0.15 in a term where everything else differs by hundredths.
+
+    Penalising conflict keeps the real signal (a picture book is not a
+    recommendation for an adult epic) without that. Deliberately asymmetric:
+    an untagged *candidate* is unknown and never in conflict, while an
+    untagged *source* is read as adult — juvenile books are reliably shelved
+    as such, so absence on the source side is the more informative direction.
+    A genuinely juvenile but untagged source loses the penalty it might have
+    wanted; it gains nothing wrong, it just stops discriminating.
+    """
+    cand_audience = cand_atoms & _AUDIENCE_ATOMS
+    if not cand_audience:
+        return False  # unknown audience is not evidence of anything
+    source_audience = profile_atoms & _AUDIENCE_ATOMS
+    if not source_audience:
+        return True  # juvenile candidate against an adult-presenting source
+    return not (cand_audience & source_audience)  # both known, and they disagree
 
 
 def _real_genres(atoms: set[str]) -> set[str]:
@@ -2612,10 +2659,14 @@ def _similar_genre_score(cand_atoms: set[str], profile_atoms: set[str]) -> float
         for a in _real_genres(_with_genre_parents(cand_atoms)) & profile_genres
     )
     coverage = min(matched / target, 1.0)
-    shares_audience = bool(
-        (cand_atoms & _AUDIENCE_ATOMS) & (profile_atoms & _AUDIENCE_ATOMS)
-    )
-    return (1 - _W_AUDIENCE) * coverage + _W_AUDIENCE * float(shares_audience)
+    penalty = (_W_AUDIENCE_PENALTY
+               if _audience_conflict(cand_atoms, profile_atoms) else 0.0)
+    agrees = bool((cand_atoms & _AUDIENCE_ATOMS) & (profile_atoms & _AUDIENCE_ATOMS))
+    # Both terms scale with coverage, so a candidate sharing only an audience
+    # shelf and no genre still scores zero. Previously the flat audience payout
+    # gave it 0.15 outright — above the relevance floor on audience alone.
+    return (_GENRE_COVERAGE_MAX * (1.0 - penalty)
+            + _W_AUDIENCE_BONUS * agrees) * coverage
 
 
 # Heuristic fiction/nonfiction classification from genre tags. Single tokens

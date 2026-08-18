@@ -386,6 +386,68 @@ def test_exact_matches_are_unchanged_by_subsumption():
         assert _similar_genre_score(atoms, atoms) == pytest.approx(0.85)
 
 
+# ---- audience: weak reward, strong penalty -----------------------------------
+# Audience used to be a flat +0.15 for agreeing, which made a `young adult
+# fiction` tag worth more than being the actual sequel: The Hobbit ranked
+# Midnight Sun and three Holly Black novels above The Lord of the Rings,
+# purely because LOTR's record carries no YA shelf.
+
+HOBBIT_YA_SOURCE = {"fantasy", "young adult fiction"}
+
+
+def test_an_untagged_candidate_is_not_treated_as_a_conflict():
+    """_AUDIENCE_ATOMS lists only juvenile shelves -- there is no "adult" atom.
+
+    So a missing audience tag cannot distinguish an adult book from an
+    uncatalogued one, and must not be scored as disagreement.
+    """
+    from server.app import _audience_conflict
+    assert not _audience_conflict({"fantasy"}, HOBBIT_YA_SOURCE)
+    assert _similar_genre_score({"fantasy"}, HOBBIT_YA_SOURCE) == pytest.approx(0.85)
+
+
+def test_a_juvenile_candidate_conflicts_with_an_adult_source():
+    from server.app import _audience_conflict
+    adult = {"fantasy"}
+    assert _audience_conflict({"fantasy", "picture books"}, adult)
+    assert _similar_genre_score({"fantasy", "picture books"}, adult) < \
+        _similar_genre_score({"fantasy"}, adult)
+
+
+def test_disagreeing_juvenile_shelves_still_conflict():
+    from server.app import _audience_conflict
+    assert _audience_conflict({"fantasy", "board books"}, HOBBIT_YA_SOURCE)
+
+
+def test_audience_agreement_still_earns_something():
+    # Removing the reward entirely would stop a children's source preferring
+    # children's books at all.
+    agree = _similar_genre_score({"fantasy", "young adult fiction"}, HOBBIT_YA_SOURCE)
+    unknown = _similar_genre_score({"fantasy"}, HOBBIT_YA_SOURCE)
+    assert agree > unknown
+
+
+def test_a_description_match_outranks_an_audience_match():
+    """The whole point: the nudge must be overturnable by real similarity.
+
+    Values are the ones measured in production -- The Lord of the Rings scored
+    desc F1 0.064 against The Hobbit, Midnight Sun 0.016.
+    """
+    from server.app import _blend_genre_desc
+    ya = _similar_genre_score({"fantasy", "romance", "young adult fiction"},
+                              HOBBIT_YA_SOURCE)
+    lotr = _similar_genre_score({"fantasy"}, HOBBIT_YA_SOURCE)
+    assert _blend_genre_desc(lotr, 0.064, has_genres=True, source_has_text=True) > \
+        _blend_genre_desc(ya, 0.016, has_genres=True, source_has_text=True)
+
+
+def test_sharing_only_an_audience_shelf_scores_nothing():
+    # The flat payout gave a candidate with no genre overlap 0.15 outright --
+    # above MIN_SIMILAR_SCORE on shelving alone.
+    assert _similar_genre_score({"romance", "young adult fiction"},
+                                HOBBIT_YA_SOURCE) == 0.0
+
+
 # ---- genre specificity -------------------------------------------------------
 # Genre agreement used to count atoms, and an atom is not a unit of evidence.
 # Measured on Dungeon Crawler Carl, whose OL record carries `litrpg` and
