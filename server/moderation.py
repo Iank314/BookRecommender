@@ -24,7 +24,7 @@ _BANNED_SUBSTRINGS = (
     "tranny", "chink", "dyke", "raghead", "gypsy",
     # Strong profanity / abuse
     "fuck", "shit", "bitch", "cunt", "whore", "slut", "cocksucker",
-    "asshole", "dickhead", "retard", "rapist", "pedo",
+    "asshole", "dickhead", "retard", "rapist", "pedo", "shitter",
     # Hate figures
     "hitler", "nazi", "kkk",
 )
