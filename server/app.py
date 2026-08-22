@@ -110,7 +110,7 @@ RemoteSource = Literal[
 app = FastAPI(title="Book Recommender API")
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
-
+ 
 # ------------------------------------------------------------------ #
 # Observability — request timing + optional tracemalloc leak-finder
 # ------------------------------------------------------------------ #

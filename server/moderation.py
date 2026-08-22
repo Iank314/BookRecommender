@@ -39,3 +39,4 @@ def username_is_clean(username: str) -> bool:
     """False when the username contains a banned term (after normalization)."""
     normalized = _normalize(username)
     return not any(term in normalized for term in _BANNED_SUBSTRINGS)
+ 
