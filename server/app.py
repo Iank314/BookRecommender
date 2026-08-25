@@ -448,7 +448,7 @@ def _popularity_signals(meta: dict) -> tuple[float, float, float, float]:
         min(math.log10(engagement + 1) / 4.0, 1.0) if engagement > 0 else 0.0,
     )
 
-
+ 
 def _score_genre(book, query_lower: str, from_subject_search: bool = True) -> float:
     """Score by tag match + popularity boost from Open Library metadata."""
     # Bases are tuned so a clean match lands near 100 regardless of source.
