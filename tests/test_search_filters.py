@@ -77,3 +77,71 @@ def test_openlibrary_cover_url_from_cover_i():
 def test_openlibrary_no_cover_is_none():
     book = Fetcher._from_openlib_doc({"key": "/works/OL1W", "title": "T"})
     assert book.metadata["thumbnail"] is None
+
+
+# ---- search result quality tie-break -----------------------------------------
+# Every exact title match scores 100, and the sort is stable, so the order
+# among them was insertion order. Google Books is fetched first, so an
+# authorless GB stub titled "The Hunger Games" outranked Suzanne Collins --
+# and /similar takes whatever /search ranked first as its source, which sent
+# the novel's recommendations into books about Napoleon.
+
+from server.app import _record_quality, _score_book  # noqa: E402
+
+
+def _rec(title="The Hunger Games", authors=(), tags=(), desc="",
+         ratings=0, want=0) -> Books:
+    return Books(id="x", title=title, authors=list(authors), description=desc,
+                 tags=list(tags),
+                 metadata={"ratings_count": ratings, "want_to_read_count": want,
+                           "edition_count": 1, "already_read_count": 0})
+
+
+NOVEL = _rec(authors=["Suzanne Collins"],
+             tags=["Dystopian", "Young adult fiction"],
+             desc="Katniss volunteers in place of her sister and is sent into "
+                  "an arena where children fight to the death on live television.",
+             ratings=9000, want=20000)
+AUTHORLESS = _rec(tags=["Contests"], desc="A book.")
+FILM_TIE_IN = _rec(authors=["Kate Egan"],
+                   tags=["Motion pictures", "Film adaptations"], desc="A book.")
+STUDY_GUIDE = _rec(authors=["Spark Publishing"],
+                   tags=["Criticism and interpretation", "Study guides"],
+                   desc="A book.")
+
+
+def test_the_real_book_outranks_its_lookalikes():
+    for other in (AUTHORLESS, FILM_TIE_IN, STUDY_GUIDE):
+        assert _record_quality(NOVEL) > _record_quality(other)
+
+
+def test_an_authorless_record_is_penalised():
+    with_author = _rec(authors=["Suzanne Collins"], tags=["Contests"], desc="A book.")
+    assert _record_quality(with_author) > _record_quality(AUTHORLESS)
+
+
+def test_editions_about_a_book_rank_below_it():
+    # A study guide and a film tie-in both have authors and tags; what marks
+    # them is being *about* the work.
+    plain = _rec(authors=["Someone"], tags=["Dystopian"], desc="A book.")
+    assert _record_quality(plain) > _record_quality(STUDY_GUIDE)
+    assert _record_quality(plain) > _record_quality(FILM_TIE_IN)
+
+
+def test_quality_never_overrides_relevance():
+    """It is a tie-break only -- a great record for the wrong book must lose.
+
+    The sort key is (relevance, quality), so this holds by construction; the
+    test pins it because reversing those would silently rerank every search.
+    """
+    q = "the hunger games"
+    wrong_book = _rec(title="Gardening Basics", authors=["A Gardener"],
+                      tags=["Gardening"], desc="How to grow vegetables well.",
+                      ratings=5000, want=9000)
+    assert _score_book(NOVEL, q, "general") > _score_book(wrong_book, q, "general")
+    assert _record_quality(wrong_book) > _record_quality(AUTHORLESS)
+    # ...yet sorted by (relevance, quality) the right book still wins.
+    ranked = sorted([NOVEL, wrong_book],
+                    key=lambda b: (_score_book(b, q, "general"), _record_quality(b)),
+                    reverse=True)
+    assert ranked[0] is NOVEL

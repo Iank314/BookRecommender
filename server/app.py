@@ -48,6 +48,7 @@ from server.recommender.recommender import Recommender
 from server.seo import (
     CORE_GENRES,
     DEFAULT_BASE_URL,
+    is_excluded_edition,
     page_url,
     robots_txt,
     sitemap_xml,
@@ -336,7 +337,14 @@ def search(
             break
 
     # --- 3) Sort, paginate ---
-    accepted.sort(key=lambda x: x[1], reverse=True)
+    # Relevance first, record quality only as a tie-break. Every exact title
+    # match scores 100, and the sort is stable, so the order among them used
+    # to be insertion order — Google Books is fetched first, so an authorless
+    # GB stub titled "The Hunger Games" beat Suzanne Collins. That matters
+    # beyond the search page: /similar takes whatever ranked first as its
+    # source, and a record with no author and no real genre sent the novel's
+    # recommendations into books about Napoleon.
+    accepted.sort(key=lambda x: (x[1], _record_quality(x[0])), reverse=True)
     accepted = accepted[: req.top_n]
 
     if not accepted and len(set(provider_errors)) == 2:
@@ -367,6 +375,32 @@ def _dedup_key_raw(title: str, author: str) -> str:
 def _dedup_key(book) -> str:
     """Create a dedup key from title + first author, normalised."""
     return _dedup_key_raw(book.title, book.authors[0] if book.authors else "")
+
+
+def _record_quality(book) -> float:
+    """How likely a record is to *be* the book, rather than something about it.
+
+    Used only to break ties between results of equal relevance — it can never
+    promote a less relevant book — so the signals can be crude.
+
+    Searching "The Hunger Games" returns, all tied at 100: an authorless stub,
+    the film tie-in, the making-of book, a SparkNotes, and the novel. What
+    separates them is not the title but whether the record has an author, says
+    what kind of book it is, and has any readership behind it.
+    """
+    atoms = set(_genre_atoms(book.tags)[0])
+    quality = 0.0
+    if book.authors:
+        quality += 2.0  # an authorless record is almost always bad metadata
+    if _real_genres(atoms):
+        quality += 1.0
+    if _has_usable_text(book.description):
+        quality += 1.0
+    if is_excluded_edition(atoms):
+        quality -= 4.0  # a study guide or film tie-in, not the work itself
+    # Readership separates the novel from its companions when the metadata
+    # can't: both may be authorless and genreless, but only one is read.
+    return quality + _book_popularity(book)
 
 
 def _score_book(book, query_lower: str, category: str) -> float:

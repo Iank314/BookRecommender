@@ -91,6 +91,10 @@ EXCLUDED_EDITION_ATOMS = frozenset({
     "study guides", "examinations", "criticism", "interpretation",
     "summary", "summaries", "abridged", "outlines", "notes",
     "questions and answers", "handbooks", "textbooks",
+    # Film tie-ins and making-of books share the novel's exact title and are
+    # catalogued under the film, not the story. Searching "The Hunger Games"
+    # returns four of them before you reach anything Suzanne Collins wrote.
+    "motion pictures", "film adaptations", "production and direction",
 })
 
 # Share of results that must have a core genre in common with the source.
