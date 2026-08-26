@@ -630,3 +630,81 @@ def test_matching_two_genres_still_beats_matching_one():
 def test_coverage_never_exceeds_one():
     profile = {"fantasy", "mystery", "romance", "horror"}
     assert _similar_genre_score(profile, profile) <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# A candidate with no real description is judged on genre, not discarded
+#
+# Open Library search records rarely carry a blurb, so the fetcher synthesises
+# "First published in 2001. | By Brandon Sanderson." — measured at 49.6% of
+# 3841 pooled candidates. The scorer required every candidate to share a
+# description token with the source, which those cannot do, so they were
+# dropped before genre was ever consulted: 435 genre-matched candidates
+# discarded for Mexican Gothic, whose result list was consequently EMPTY.
+#
+# The rule also admitted boilerplate on an arbitrary signal, since the only
+# tokens such a string can share are the author's name and the year — which is
+# why "The Lost Metal" and "Storm Front" led Mistborn's list.
+#
+# Absence of evidence is now separated from evidence of difference: a real
+# blurb sharing nothing is still dropped (see
+# test_a_real_blurb_still_requires_shared_description above).
+# ---------------------------------------------------------------------------
+
+from server.app import _is_synthesized_blurb  # noqa: E402
+
+
+@pytest.mark.parametrize("description,synthesized", [
+    ("First published in 2001. | By Brandon Sanderson.", True),
+    ("First published in 2012. | By B. Sanderson, A. Flagg, P. Kapera.", True),
+    ("First published in 1974.", True),
+    # A subtitle is the one part of the fallback that describes the book, so a
+    # record carrying one is judged on its text like any other.
+    ("The Reckoners | First published in 2013. | By Brandon Sanderson.", False),
+    # Real prose that happens to open with "By" — five such blurbs sit in the
+    # measured pools, which is why the match anchors on the year clause.
+    ("By the time she was thirty, she had crossed three continents.", False),
+    # Short, but real: its failure to match a source is genuine evidence.
+    ("Corporate accounting in the modern firm.", False),
+    ("", False),
+])
+def test_synthesized_blurb_detection(description, synthesized):
+    assert _is_synthesized_blurb(description) is synthesized
+
+
+def test_a_synthesized_blurb_candidate_is_ranked_on_genre():
+    # The Mexican Gothic regression: these were dropped, and the endpoint
+    # returned nothing at all despite a pool full of genre-matched books.
+    boilerplate = _bk("boiler", "Tower of Ash",
+                      description="First published in 1997. | By A. Writer.",
+                      tags=["Fantasy", "Epic Fantasy"])
+    scored = _score_similar_candidates(SOURCE, [boilerplate])
+    assert scored, "a candidate with no real blurb must still rank on genre"
+    assert scored[0][0].id == "boiler"
+
+
+def test_an_uncorroborated_candidate_ranks_below_a_corroborated_one():
+    # The ordering guarantee that makes the above safe. Promoting a textless
+    # candidate to a full genre score would put it above every real match --
+    # genre alone pays 0.85 where a corroborated match tops out near 0.37 --
+    # so it is scored W_GENRE * genre instead, strictly below its corroborated
+    # twin. Both books here have identical tags; only the blurb differs.
+    corroborated = _bk("real", "Blade of Winter",
+                       description="An orphan wields an enchanted sword against "
+                                   "the necromancer armies in a frozen dying "
+                                   "kingdom.",
+                       tags=["Fantasy", "Epic Fantasy"])
+    uncorroborated = _bk("boiler", "Tower of Ash",
+                         description="First published in 1997. | By A. Writer.",
+                         tags=["Fantasy", "Epic Fantasy"])
+    scored = _score_similar_candidates(SOURCE, [uncorroborated, corroborated])
+    assert [b.id for b, _ in scored] == ["real", "boiler"]
+
+
+def test_a_synthesized_blurb_with_no_shared_genre_still_does_not_rank():
+    # Relaxing the description gate must not become "everything ranks": with
+    # no genre in common there is no signal left on either side.
+    off_genre = _bk("off", "Quarterly Returns",
+                    description="First published in 1997. | By A. Writer.",
+                    tags=["Business & Economics"])
+    assert _score_similar_candidates(SOURCE, [off_genre]) == []

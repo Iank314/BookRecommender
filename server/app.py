@@ -682,6 +682,51 @@ def _has_usable_text(text: str) -> bool:
     return len(_tokenize(text)) >= _MIN_SOURCE_TEXT_TOKENS
 
 
+# Open Library search records rarely carry a real blurb, so _from_openlib_doc
+# synthesises one from the fields that are always present:
+#     "<subtitle> | First published in <year>. | By <a>, <b>, <c>."
+# Half of a typical candidate pool carries nothing else — measured at 1906 of
+# 3841 candidates across the Mistborn / The Hobbit / Mexican Gothic pools, every
+# one of them in the canonical two-part form.
+#
+# The year clause is what the match anchors on. A "By ..." clause alone is not
+# enough, and that is measured rather than cautious: of the 8 pooled
+# descriptions that are a bare "By ...", five are real prose ("By the time
+# Professor Richard Lovell found his way through Canton's narrow alleys...",
+# "By human standards it could not possibly have been artificial..."). A
+# permissive rule would have read those as boilerplate and scored the books on
+# genre instead of correctly dropping them. It costs one true positive in 3841.
+_SYNTH_BLURB_YEAR_RE = re.compile(r"^first published in \d{3,4}\.?$", re.IGNORECASE)
+_SYNTH_BLURB_BY_RE = re.compile(r"^by .+$", re.IGNORECASE)
+
+
+def _is_synthesized_blurb(description: str) -> bool:
+    """Whether a description is Open Library's synthesised fallback, not a blurb.
+
+    Matched on the producer's *shape*, and that is the whole point: neither
+    characters nor tokens can answer this question. "First published in 2012. |
+    By Brandon Sanderson, Alex Flagg, Patrick Kapera." is 76 characters and 8
+    tokens, past every length bar the codebase has tried, while "Corporate
+    accounting in the modern firm." is 4 tokens and is a *real* description
+    whose failure to match a source is genuine evidence the two books are
+    unalike. Only the format separates them, and _from_openlib_doc is the only
+    thing that produces it.
+
+    A subtitle counts as real content. The fallback prepends one when the
+    record has it, and it is the single part of that string which says anything
+    about the book, so a record carrying one is judged on its text like any
+    other. This is why the match is per-part rather than a substring test.
+    """
+    parts = [p.strip() for p in (description or "").split("|")]
+    parts = [p for p in parts if p]
+    if not parts:
+        return False
+    if not all(_SYNTH_BLURB_YEAR_RE.match(p) or _SYNTH_BLURB_BY_RE.match(p)
+               for p in parts):
+        return False
+    return any(_SYNTH_BLURB_YEAR_RE.match(p) for p in parts)
+
+
 def _enrich_source_by_title_lookup(source: Books) -> None:
     """Last-resort source enrichment: find the same book in either provider by
     title and borrow the richest record's tags + description. Saves sparse
@@ -1504,6 +1549,18 @@ def _blend_genre_desc(
     a perfect genre match down to W_GENRE — 0.4 at best, and near zero once the
     description weight dominates. Judge on genre alone instead, for the same
     reason: don't penalise a book for a signal it never had a chance to earn.
+
+    A textless *candidate* is deliberately NOT handled the same way, and the
+    asymmetry is the point rather than an oversight. When the source has no
+    text, nothing in the pool can be corroborated, so genre is the only ruler
+    available and every candidate is measured by it. When only the candidate
+    lacks text, its peers *are* corroborated, and promoting it to full genre
+    would rank an unverifiable book above a verified one: on Mistborn's pool a
+    corroborated match tops out around 0.37, while genre alone pays 0.85. So a
+    textless candidate is passed desc_score=0 by _score_similar_candidates and
+    scores W_GENRE * genre — strictly below an otherwise identical candidate
+    that also shares content, which is the ordering the evidence supports.
+    No separate discount constant: the blend already expresses it.
     """
     if not has_genres:
         return desc_score
@@ -1545,12 +1602,36 @@ def _score_similar_candidates(
     for cand in candidates:
         if not _has_recommendable_content(cand):
             continue  # no description — genre alone is too weak to recommend on
-        cand_text = _content_tokens(cand)
-        desc_score = _idf_weighted_f1(src_text, cand_text, idf, default_idf)
-        # When the source has a real description, a candidate must share some
-        # of it — genre overlap alone can't rank it (every candidate was
-        # fetched by genre). When it doesn't, genre is all there is.
-        if source_has_text and desc_score <= 0:
+        # A description is only evidence when it says something. Providers
+        # synthesise "First published in 2001. | By Brandon Sanderson." and
+        # call it a blurb, and that is the common case, not the exception:
+        # 49.6% of pooled candidates carry nothing else.
+        #
+        # Note this is _is_synthesized_blurb and NOT the token-count test used
+        # for `source_has_text` above. The two questions differ. On the source
+        # side, a short blurb genuinely cannot rank a pool, so a token floor is
+        # the right measure. On the candidate side the question is whether the
+        # book had a description *at all*, and a short real one — "Corporate
+        # accounting in the modern firm.", 4 tokens — is evidence of
+        # dissimilarity that a token floor would silently discard.
+        cand_has_text = not _is_synthesized_blurb(cand.description)
+        desc_score = (
+            _idf_weighted_f1(src_text, _content_tokens(cand), idf, default_idf)
+            if cand_has_text else 0.0
+        )
+        # Shared description tokens are required only when BOTH sides have a
+        # real description. A genuine blurb overlapping nothing is evidence the
+        # books are unalike; boilerplate overlapping nothing says only that the
+        # provider has no blurb for it, so dropping on that filters by data
+        # availability rather than by relevance.
+        #
+        # Conflating the two discarded most of every pool before genre was ever
+        # consulted — 435 genre-matched candidates for Mexican Gothic, whose
+        # result list was consequently empty — and admitted boilerplate on an
+        # arbitrary signal, since the only tokens it can share are the author's
+        # name and the year. That is why The Lost Metal and Storm Front led
+        # Mistborn's list: "| By Brandon Sanderson." matched the source blurb.
+        if source_has_text and cand_has_text and desc_score <= 0:
             continue
         cand_genres = set(_genre_atoms(cand.tags)[0])
         if not source_has_text and not cand_genres:
