@@ -156,7 +156,29 @@ _GB_SEMAPHORE = threading.Semaphore(3)
 _GB_COOLDOWN_SECONDS = 60.0
 _gb_cooldown_until = 0.0
 _gb_last_refusal: str | None = None
+_gb_last_failure_at = 0.0
 _gb_state_lock = threading.Lock()
+
+
+def _record_gb_failure(reason: str) -> None:
+    """Note a Google Books failure WITHOUT tripping the breaker.
+
+    503 is the common one in production — measured 1 of 3 requests on an
+    otherwise healthy day, and the one that failed was a `subject:` query,
+    which is what both recommendation paths are built from. It deliberately
+    does not start a cooldown: the breaker is a politeness response to being
+    told to slow down (429), and a server fault is not that — backing off for
+    a minute on someone else's outage would throw away the two-in-three
+    requests that still work.
+
+    Recording it is still necessary, or google_books_status() reports
+    "available" while every genre query is failing, which is precisely the
+    blind spot this status exists to close.
+    """
+    global _gb_last_refusal, _gb_last_failure_at
+    with _gb_state_lock:
+        _gb_last_refusal = reason
+        _gb_last_failure_at = time.time()
 
 
 def _gb_in_cooldown() -> bool:
@@ -172,11 +194,13 @@ def _set_gb_cooldown(reason: str) -> bool:
     and three identical warnings per minute reads as a storm rather than a
     state change.
     """
-    global _gb_cooldown_until, _gb_last_refusal
+    global _gb_cooldown_until, _gb_last_refusal, _gb_last_failure_at
     with _gb_state_lock:
-        was_cooling = time.time() < _gb_cooldown_until
-        _gb_cooldown_until = time.time() + _GB_COOLDOWN_SECONDS
+        now = time.time()
+        was_cooling = now < _gb_cooldown_until
+        _gb_cooldown_until = now + _GB_COOLDOWN_SECONDS
         _gb_last_refusal = reason
+        _gb_last_failure_at = now
         return not was_cooling
 
 
@@ -213,13 +237,21 @@ def google_books_status() -> dict:
     came from both providers or from Open Library alone.
     """
     with _gb_state_lock:
-        remaining = max(0.0, _gb_cooldown_until - time.time())
+        now = time.time()
+        remaining = max(0.0, _gb_cooldown_until - now)
         return {
             "key_configured": bool(
                 os.environ.get("GOOGLE_BOOKS_API_KEY")),
             "available": remaining <= 0.0,
             "cooldown_seconds_remaining": round(remaining, 1),
             "last_refusal": _gb_last_refusal,
+            # Read this alongside `available`: a 503 storm leaves the breaker
+            # untripped (available=True) while nothing actually succeeds, so a
+            # recent timestamp here with available=True is the signal that
+            # Google is faulting rather than throttling.
+            "seconds_since_last_failure": (
+                round(now - _gb_last_failure_at, 1) if _gb_last_failure_at else None
+            ),
         }
 
 
@@ -432,6 +464,12 @@ class Fetcher:
                         _GB_COOLDOWN_SECONDS, reason,
                     )
                 return ([], 0) if return_total else []
+            # Not a quota refusal — 503 "Service temporarily unavailable" is
+            # the common one, and it re-raises for the caller to handle. Record
+            # it first: without this the status would report Google Books
+            # available while every genre query was failing.
+            _record_gb_failure(
+                f"HTTP {getattr(resp, 'status_code', '?')} from Google Books")
             raise
         items = data.get("items", [])
         total = data.get("totalItems", 0)

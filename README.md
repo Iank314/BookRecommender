@@ -6,7 +6,7 @@
 
 **Active iteration.** Recent work has been on recommendation-quality bug fixes surfaced by real use of the live app — categorization heuristics (facet-prefixed tags, series-name vs. genre ranking, genre derivation from description text), foreign-edition language detection (title script wins over metadata), sequel detection from descriptions ("the fourth book in...", "the last book in this series"), and **genre-vocabulary normalization**: folding synonyms across the Google Books and Open Library vocabularies (so "sci-fi", "Science-Fiction", and "Science Fiction" score as a match) and dropping non-genre "subject" atoms that were manufacturing cross-genre matches. The latest fix (July 2026) targets Open Library subject facets that aren't genres — marketing labels like "New York Times bestseller", which had scored Jordan Peterson's self-help *Beyond Order* a 0.5 genre overlap with *The Way of Kings* (surfacing it in an epic-fantasy list), and topical facets like "married people", which pulled romances into *Gone Girl*'s recommendations. The pattern lately is: try the app → run `python -m scripts.explain_similar "<title>"` → read the score breakdown to find the bad recommendation's root cause → add a small targeted fix + a regression test.
 
-**Deployment history & next steps.** The app previously ran from a home machine via a Cloudflare Tunnel; that's retired now that it's on Lightsail (the `docker-compose.yml` tunnel profiles remain for local demos only). The old "migrate to Postgres for Koyeb" plan is **obsolete**: Lightsail's persistent disk means SQLite stays. Current operational priorities: enable Lightsail automatic snapshots (backups), set `GOOGLE_BOOKS_API_KEY` on the server, and optionally a GitHub Action for push-to-deploy.
+**Deployment history & next steps.** The app previously ran from a home machine via a Cloudflare Tunnel; that's retired now that it's on Lightsail (the `docker-compose.yml` tunnel profiles remain for local demos only). The old "migrate to Postgres for Koyeb" plan is **obsolete**: Lightsail's persistent disk means SQLite stays. Current operational priorities: enable Lightsail automatic snapshots (backups), and optionally a GitHub Action for push-to-deploy. (`GOOGLE_BOOKS_API_KEY` **is** set on the server — verified Aug 2026; this line used to say otherwise and the stale entry caused a wrong diagnosis.)
 
 ---
 
@@ -311,7 +311,7 @@ Frontend changes: remember to bump the `?v=N` query strings in `index.html`. Pay
 - The database is `~/app/data/library.db` **on the server** — the laptop copy is dev/test data now; they diverged at migration. Never deploy by copying a local DB over the server's.
 - Useful: `sudo docker compose -f docker-compose.prod.yml logs -f bookrec` (live request log), `logs caddy` (cert issuance), `ps` (status).
 - Costs: $12/mo instance (first 90 days free) + ~$13/yr domain. Static IP free while attached.
-- Backlog: enable Lightsail automatic snapshots for backups; set `GOOGLE_BOOKS_API_KEY` in an `.env` file or the compose environment.
+- Backlog: enable Lightsail automatic snapshots for backups. (`GOOGLE_BOOKS_API_KEY` is already set on the server — check `google_books` in `GET /admin/stats` rather than trusting this list.)
 
 ### CLI Demo
 

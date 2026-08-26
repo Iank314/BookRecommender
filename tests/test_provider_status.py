@@ -59,6 +59,7 @@ def gb_429(monkeypatch):
     # Reset the breaker so each test observes the transition itself.
     monkeypatch.setattr(fetcher, "_gb_cooldown_until", 0.0)
     monkeypatch.setattr(fetcher, "_gb_last_refusal", None)
+    monkeypatch.setattr(fetcher, "_gb_last_failure_at", 0.0)
     return fake
 
 
@@ -113,3 +114,34 @@ def test_a_refusal_message_never_leaks_a_credential():
     described = fetcher._describe_gb_refusal(_KeyInMessage(), has_key=True)
     assert "SECRETVALUE" not in described
     assert "REDACTED" in described
+
+
+class _Resp503(_Resp429):
+    status_code = 503
+
+    def json(self):
+        return {"error": {"message": "Service temporarily unavailable."}}
+
+    def raise_for_status(self):
+        raise fetcher.requests.exceptions.HTTPError(
+            "503 Server Error: Service Unavailable", response=self)
+
+
+def test_a_503_is_recorded_but_does_not_trip_the_breaker(gb_429, monkeypatch):
+    # Measured in production: 1 of 3 requests 503'd on an otherwise healthy
+    # day, and the failing one was a `subject:` query -- what both
+    # recommendation paths are built from. Backing off for a minute on
+    # someone else's server fault would discard the two that still work, but
+    # reporting "available" while genre queries fail is the blind spot this
+    # status exists to close.
+    monkeypatch.setattr(gb_429, "get",
+                        lambda url, params=None, timeout=None, headers=None: _Resp503())
+
+    f = fetcher.Fetcher(source=fetcher.GOOGLE_ENDPOINT)
+    with pytest.raises(fetcher.requests.exceptions.HTTPError):
+        f.fetch_google_page("subject:fantasy", category="genre")
+
+    status = fetcher.google_books_status()
+    assert status["available"] is True, "a server fault must not trip the breaker"
+    assert "503" in status["last_refusal"]
+    assert status["seconds_since_last_failure"] is not None
