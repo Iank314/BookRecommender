@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field, constr
 
 import hashlib
 
+from server import ENV_FROM_FILE as _ENV_FROM_FILE
 from server.auth_throttle import LoginThrottle
 from server.moderation import username_is_clean
 from server.cache.rec_cache import CACHE_VERSION, RecommendationCache, TTLCache
@@ -41,6 +42,7 @@ from server.fetcher.fetcher import (
     OPENLIB_ENDPOINT,
     cache_bytes as fetcher_cache_bytes,
     cache_size as fetcher_cache_size,
+    google_books_status,
 )
 from server.models.book import Books
 from server.recommender.recommendation_engine import RecommendationEngine
@@ -92,6 +94,12 @@ SESSION_COOKIE_SECURE = _env_flag("BOOKREC_SECURE_COOKIES")
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 logger = logging.getLogger(__name__)
+if _ENV_FROM_FILE:
+    # Names only — these are secrets by definition. Worth logging at all
+    # because "is my .env actually being read?" is otherwise unanswerable
+    # without adding a print, and the answer decides whether a local run has
+    # Google Books at all.
+    logger.info("Loaded from .env: %s", ", ".join(sorted(_ENV_FROM_FILE)))
 # Upper bounds exist because /search and /similar take no authentication and
 # their text drives tokenisation and scoring — without a ceiling, body size is
 # free CPU for anyone who asks. The limits are far above any real input: the
@@ -2091,6 +2099,12 @@ def admin_stats(user_id: str = Depends(get_admin_user_id)):
         },
         # Process memory in MiB (Linux prod only; empty on Windows dev).
         "memory": _process_memory(),
+        # Is Google Books actually answering? It degrades to an empty result
+        # set rather than an error, so "results got worse" and "one provider
+        # stopped replying" look identical from the outside. `key_configured`
+        # false in production means every search is running on Open Library
+        # alone.
+        "google_books": google_books_status(),
     }
 
 

@@ -6,11 +6,14 @@ Fetch book data from Google Books or Open Library and return them as
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
 import time
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 try:
     import requests  # type: ignore
@@ -152,6 +155,7 @@ _GB_SEMAPHORE = threading.Semaphore(3)
 # so we fail fast (and politely) instead of retry-sleeping on every later query.
 _GB_COOLDOWN_SECONDS = 60.0
 _gb_cooldown_until = 0.0
+_gb_last_refusal: str | None = None
 _gb_state_lock = threading.Lock()
 
 
@@ -160,10 +164,63 @@ def _gb_in_cooldown() -> bool:
         return time.time() < _gb_cooldown_until
 
 
-def _set_gb_cooldown() -> None:
-    global _gb_cooldown_until
+def _set_gb_cooldown(reason: str) -> bool:
+    """Trip the breaker. Returns True if this *started* a cooldown window.
+
+    The return value exists so the caller logs once per outage rather than
+    once per refused query: three concurrent genre queries all 429 together,
+    and three identical warnings per minute reads as a storm rather than a
+    state change.
+    """
+    global _gb_cooldown_until, _gb_last_refusal
     with _gb_state_lock:
+        was_cooling = time.time() < _gb_cooldown_until
         _gb_cooldown_until = time.time() + _GB_COOLDOWN_SECONDS
+        _gb_last_refusal = reason
+        return not was_cooling
+
+
+def _describe_gb_refusal(resp, has_key: bool) -> str:
+    """Turn a Google Books 429 into a sentence that names the actual cause.
+
+    The two causes look identical in the status code and are fixed by opposite
+    actions, so collapsing them into "rate limited" is what let local dev spend
+    months believing unauthenticated Google Books "returns 0 records". It does
+    not: it returns 429 "Quota exceeded ... for consumer
+    'project_number:<google's own project>'", because keyless requests share
+    one global anonymous pool that the whole internet exhausts daily.
+    """
+    detail = ""
+    try:
+        detail = ((resp.json() or {}).get("error") or {}).get("message", "") or ""
+    except Exception:
+        detail = ""
+    detail = redact_secrets(detail.strip())
+    if has_key:
+        return f"the configured API key's quota is exhausted or throttled ({detail})"
+    return (
+        "no GOOGLE_BOOKS_API_KEY is set, so requests fall into Google's shared "
+        f"anonymous quota pool, which is routinely already exhausted ({detail})"
+    )
+
+
+def google_books_status() -> dict:
+    """Whether Google Books is currently answering — for /admin/stats and tools.
+
+    `available` means only "the breaker is not tripped", not "Google is
+    healthy"; nothing here proves the next request succeeds. It is enough to
+    answer the question that matters, which is whether a given run's results
+    came from both providers or from Open Library alone.
+    """
+    with _gb_state_lock:
+        remaining = max(0.0, _gb_cooldown_until - time.time())
+        return {
+            "key_configured": bool(
+                os.environ.get("GOOGLE_BOOKS_API_KEY")),
+            "available": remaining <= 0.0,
+            "cooldown_seconds_remaining": round(remaining, 1),
+            "last_refusal": _gb_last_refusal,
+        }
 
 
 # Credentials in a query string. requests quotes the full request URL in its
@@ -360,7 +417,20 @@ class Fetcher:
         except requests.exceptions.HTTPError as exc:
             resp = getattr(exc, "response", None)
             if resp is not None and resp.status_code == 429:
-                _set_gb_cooldown()  # back off Google for a while, lean on OL
+                # Back off Google for a while and lean on Open Library — but
+                # say so. Returning an empty list silently is what made every
+                # keyless run look like "Google Books has no results for this
+                # query" instead of "Google Books refused to answer", and a
+                # measurement built on that reads as a scoring result.
+                reason = _describe_gb_refusal(resp, bool(key))
+                if _set_gb_cooldown(reason):
+                    logger.warning(
+                        "Google Books unavailable for the next %.0fs: %s. "
+                        "Results now come from Open Library alone, which "
+                        "understates coverage — do not calibrate thresholds "
+                        "against them.",
+                        _GB_COOLDOWN_SECONDS, reason,
+                    )
                 return ([], 0) if return_total else []
             raise
         items = data.get("items", [])

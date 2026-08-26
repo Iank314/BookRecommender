@@ -24,6 +24,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from scripts._lookup import find_source as _find_source
+from server.fetcher.fetcher import google_books_status
 from server.app import (
     SimilarRequest,
     _book_popularity,
@@ -65,6 +66,21 @@ def main() -> None:
     print(f"  after enrichment: genre atoms {sorted(src_spec) or '(none)'}, "
           f"description {len(source_book.description)} chars")
     print(f"  language: {src_lang or '?'} | candidates after filters: {len(candidates)}")
+
+    # State which providers actually answered. Google Books refuses keyless
+    # requests outright (429 on its shared anonymous quota), and the fetcher
+    # degrades to Open Library alone — silently, until now. A pool built that
+    # way is systematically thinner than production's, so any number read off
+    # this run without knowing that is a wrong conclusion waiting to happen.
+    gb = google_books_status()
+    if not gb["available"]:
+        print(f"\n  !! GOOGLE BOOKS DID NOT ANSWER — {gb['last_refusal']}")
+        print("     This pool is Open Library only and understates coverage.")
+        print("     Thresholds measured here will not match production.")
+    elif not gb["key_configured"]:
+        print("\n  !! No GOOGLE_BOOKS_API_KEY set — Google Books will 429 on its")
+        print("     shared anonymous quota. Put a key in .env for a real pool.")
+
     if not candidates:
         raise SystemExit("No candidates survived the filters.")
 
