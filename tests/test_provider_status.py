@@ -145,3 +145,68 @@ def test_a_503_is_recorded_but_does_not_trip_the_breaker(gb_429, monkeypatch):
     assert status["available"] is True, "a server fault must not trip the breaker"
     assert "503" in status["last_refusal"]
     assert status["seconds_since_last_failure"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Retry policy, measured from the production container over `subject:` genre
+# queries -- the shape both recommendation paths issue:
+#   first attempt        5/10
+#   with 1 retry (old)   7/10
+#   with 3 retries       9/10   (0.5/1/2s curve)
+#   with 3 short retries 7/10   (flat 0.2s -- the waiting does real work)
+# ---------------------------------------------------------------------------
+
+def test_google_books_retries_more_than_open_library():
+    # Not symmetry for its own sake: Open Library blocked this app's production
+    # IP once, so its failures must thin the pool rather than escalate against
+    # it. Google Books sheds load and recovers, so retrying pays.
+    assert fetcher._GB_RETRIES > fetcher._OL_RETRIES
+    assert fetcher._OL_RETRIES == 1
+
+
+def test_backoff_is_jittered_but_still_grows():
+    # Up to five genre queries fire concurrently; identical sleeps would aim a
+    # synchronised burst at a service that just said it was overloaded.
+    first = {fetcher._backoff_delay(1) for _ in range(50)}
+    assert len(first) > 1, "identical delays would resynchronise the retries"
+    assert all(0.5 <= d <= 1.0 for d in first), sorted(first)[:3]
+    # Still exponential on average, so later attempts wait longer.
+    assert (sum(fetcher._backoff_delay(3) for _ in range(50)) >
+            sum(fetcher._backoff_delay(1) for _ in range(50)))
+
+
+def test_one_failure_does_not_trip_the_breaker_but_enough_do(gb_429, monkeypatch):
+    monkeypatch.setattr(fetcher, "_gb_consecutive_failures", 0)
+    for i in range(fetcher._GB_MAX_CONSECUTIVE_FAILURES - 1):
+        assert fetcher._record_gb_failure(f"HTTP 503 #{i}") is False
+    assert fetcher._record_gb_failure("HTTP 503 final") is True
+
+
+def test_a_success_resets_the_outage_count(gb_429, monkeypatch):
+    # The normal state is flaky-but-working: roughly half of genre queries 503
+    # on the first attempt and recover. Without a reset, a healthy hour would
+    # accumulate to the threshold and trip a cooldown on a working provider.
+    monkeypatch.setattr(fetcher, "_gb_consecutive_failures", 0)
+    for _ in range(fetcher._GB_MAX_CONSECUTIVE_FAILURES - 1):
+        fetcher._record_gb_failure("HTTP 503")
+    fetcher._record_gb_success()
+    assert fetcher.google_books_status()["consecutive_failures"] == 0
+    assert fetcher._record_gb_failure("HTTP 503") is False, "count must restart"
+
+
+def test_a_sustained_outage_eventually_trips_the_cooldown(gb_429, monkeypatch, caplog):
+    monkeypatch.setattr(gb_429, "get",
+                        lambda url, params=None, timeout=None, headers=None: _Resp503())
+    monkeypatch.setattr(fetcher, "_gb_consecutive_failures", 0)
+    monkeypatch.setattr(fetcher, "_backoff_delay", lambda attempt: 0.0)  # no real sleeping
+
+    f = fetcher.Fetcher(source=fetcher.GOOGLE_ENDPOINT)
+    with caplog.at_level(logging.WARNING, logger=fetcher.__name__):
+        for i in range(fetcher._GB_MAX_CONSECUTIVE_FAILURES):
+            with pytest.raises(fetcher.requests.exceptions.HTTPError):
+                f.fetch_google_page(f"outage-{i}", category="genre")
+
+    status = fetcher.google_books_status()
+    assert status["available"] is False, "a sustained outage must stop the retrying"
+    assert "consecutive failures" in status["last_refusal"]
+    assert any("failed 5 times in a row" in r.getMessage() for r in caplog.records)

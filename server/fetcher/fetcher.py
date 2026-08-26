@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import re
 import threading
 import time
@@ -54,8 +55,39 @@ _HEADERS = {"User-Agent": _USER_AGENT, "Accept": "application/json"}
 # those could be in flight across simultaneous requests.
 _OL_SEMAPHORE = threading.Semaphore(3)
 
-# Statuses worth a second attempt: rate limiting and transient server faults.
+# Statuses worth another attempt: rate limiting and transient server faults.
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+# Retry counts are per-provider, because the two pose opposite risks.
+#
+# Google Books sheds load hard. Measured from the production container over 10
+# `subject:` genre queries — the shape both recommendation paths issue — only
+# 5/10 succeeded on the first attempt. With the old single retry that is 7/10;
+# with three retries on the 0.5/1/2s curve it is 9/10. A flat 0.2s delay
+# recovered just 7/10 over a comparable sample, so the waiting is doing real
+# work rather than the failures being a pure per-request lottery.
+#
+# Open Library stays at one retry deliberately. It blocked this app's
+# production IP once already, and retrying harder against a service that has
+# refused us is exactly the wrong direction — its failures should thin the
+# pool, not escalate.
+_GB_RETRIES = 3
+_OL_RETRIES = 1
+
+
+def _backoff_delay(attempt: int) -> float:
+    """Exponential backoff with equal jitter.
+
+    The undelayed curve is 0.5 * 2**attempt, which is what the production
+    measurement above validated. Jitter matters because up to five genre
+    queries fire concurrently: on a 503 they would otherwise all sleep exactly
+    the same interval and retry in the same instant, which is a synchronised
+    burst aimed at a service that just said it was overloaded. Spreading them
+    over [base/2, base] decorrelates the retries without materially changing
+    how long we wait.
+    """
+    base = 0.5 * (2 ** attempt)
+    return base / 2 + random.random() * (base / 2)
 
 # In-memory response cache so repeated genre queries (litrpg, fantasy, ...) across
 # /search, /similar and /library/recommend don't re-hit the APIs within the TTL.
@@ -160,25 +192,47 @@ _gb_last_failure_at = 0.0
 _gb_state_lock = threading.Lock()
 
 
-def _record_gb_failure(reason: str) -> None:
-    """Note a Google Books failure WITHOUT tripping the breaker.
+# How many Google Books requests must fail *back to back* before we stop
+# retrying and fail fast for a cooldown window.
+#
+# This is the counterweight to _GB_RETRIES. Measured, roughly half of genre
+# queries 503 on the first attempt and nine in ten recover within four, so a
+# lone failure is a load-shedding lottery ticket and must not cost anyone a
+# cooldown. A sustained outage is a different animal: without a bound, every
+# request would pay 5 queries x 4 attempts x up to 3.5s of backoff, for
+# nothing. Consecutive failures separate the two, and any success resets the
+# count — so the threshold is only reached when Google is genuinely down for
+# us rather than merely flaky.
+_GB_MAX_CONSECUTIVE_FAILURES = 5
+_gb_consecutive_failures = 0
 
-    503 is the common one in production — measured 1 of 3 requests on an
-    otherwise healthy day, and the one that failed was a `subject:` query,
-    which is what both recommendation paths are built from. It deliberately
-    does not start a cooldown: the breaker is a politeness response to being
-    told to slow down (429), and a server fault is not that — backing off for
-    a minute on someone else's outage would throw away the two-in-three
-    requests that still work.
 
-    Recording it is still necessary, or google_books_status() reports
+def _record_gb_failure(reason: str) -> bool:
+    """Note a Google Books failure. Returns True if the breaker should trip.
+
+    A single 503 deliberately does NOT start a cooldown: the breaker is a
+    politeness response to being told to slow down (429), and a server fault
+    is not that — backing off for a minute on one shed request would throw
+    away the majority that still succeed.
+
+    Recording is still necessary either way, or google_books_status() reports
     "available" while every genre query is failing, which is precisely the
-    blind spot this status exists to close.
+    blind spot that status exists to close.
     """
-    global _gb_last_refusal, _gb_last_failure_at
+    global _gb_last_refusal, _gb_last_failure_at, _gb_consecutive_failures
     with _gb_state_lock:
         _gb_last_refusal = reason
         _gb_last_failure_at = time.time()
+        _gb_consecutive_failures += 1
+        return _gb_consecutive_failures >= _GB_MAX_CONSECUTIVE_FAILURES
+
+
+def _record_gb_success() -> None:
+    """Reset the consecutive-failure count. Flakiness must not accumulate into
+    an outage verdict across an otherwise healthy hour."""
+    global _gb_consecutive_failures
+    with _gb_state_lock:
+        _gb_consecutive_failures = 0
 
 
 def _gb_in_cooldown() -> bool:
@@ -252,6 +306,10 @@ def google_books_status() -> dict:
             "seconds_since_last_failure": (
                 round(now - _gb_last_failure_at, 1) if _gb_last_failure_at else None
             ),
+            # Distance to the outage verdict. A steady 1-2 here is the normal
+            # flaky-but-working state; climbing toward
+            # _GB_MAX_CONSECUTIVE_FAILURES means a real outage is forming.
+            "consecutive_failures": _gb_consecutive_failures,
         }
 
 
@@ -322,7 +380,8 @@ def _get_json(url: str, params: dict | None, *,
         # discarded that query's entire candidate pool, up to 1000 books.
         if resp.status_code in _RETRY_STATUSES and attempt < retries:
             retry_after = resp.headers.get("Retry-After")
-            wait = float(retry_after) if (retry_after or "").isdigit() else 0.5 * (2 ** attempt)
+            wait = (float(retry_after) if (retry_after or "").isdigit()
+                    else _backoff_delay(attempt))
             time.sleep(min(wait, 5.0))
             attempt += 1
             continue
@@ -394,7 +453,7 @@ class Fetcher:
             key = "/" + key
         try:
             data = _get_json(f"{OPENLIB_BASE}{key}.json", None,
-                             semaphore=_OL_SEMAPHORE, retries=1)
+                             semaphore=_OL_SEMAPHORE, retries=_OL_RETRIES)
         except Exception:
             return "", []
 
@@ -445,7 +504,7 @@ class Fetcher:
 
         try:
             data = _get_json(GOOGLE_ENDPOINT, params,
-                             semaphore=_GB_SEMAPHORE, retries=1)
+                             semaphore=_GB_SEMAPHORE, retries=_GB_RETRIES)
         except requests.exceptions.HTTPError as exc:
             resp = getattr(exc, "response", None)
             if resp is not None and resp.status_code == 429:
@@ -468,9 +527,29 @@ class Fetcher:
             # the common one, and it re-raises for the caller to handle. Record
             # it first: without this the status would report Google Books
             # available while every genre query was failing.
-            _record_gb_failure(
-                f"HTTP {getattr(resp, 'status_code', '?')} from Google Books")
+            #
+            # It has already exhausted _GB_RETRIES by this point, so reaching
+            # here means ~4 attempts failed. Enough of those back to back and
+            # this stops being flakiness and starts being an outage, at which
+            # point retrying every query is pure latency for no recall.
+            status_code = getattr(resp, "status_code", "?")
+            if _record_gb_failure(f"HTTP {status_code} from Google Books"):
+                if _set_gb_cooldown(
+                        f"{_GB_MAX_CONSECUTIVE_FAILURES} consecutive failures "
+                        f"(last: HTTP {status_code})"):
+                    logger.warning(
+                        "Google Books has failed %d times in a row (last: HTTP "
+                        "%s); backing off for %.0fs and serving Open Library "
+                        "alone. A single 503 is normal here — this many is an "
+                        "outage.",
+                        _GB_MAX_CONSECUTIVE_FAILURES, status_code,
+                        _GB_COOLDOWN_SECONDS,
+                    )
             raise
+        # Any success clears the outage count. Without this, a long healthy
+        # run peppered with the normal ~50% first-attempt 503 rate would creep
+        # to the threshold and trip a cooldown on a provider that is working.
+        _record_gb_success()
         items = data.get("items", [])
         total = data.get("totalItems", 0)
         books = [self._from_google_item(it) for it in items]
@@ -524,7 +603,7 @@ class Fetcher:
         }
 
         data = _get_json(OPENLIB_ENDPOINT, params,
-                         semaphore=_OL_SEMAPHORE, retries=1)
+                         semaphore=_OL_SEMAPHORE, retries=_OL_RETRIES)
         docs = data.get("docs", [])
         total = data.get("numFound", 0)
         return [self._from_openlib_doc(doc) for doc in docs], total
