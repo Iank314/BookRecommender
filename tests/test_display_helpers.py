@@ -5,6 +5,8 @@
     _desc_is_sequel — sequel detection from description text
 """
 
+import pytest
+
 from server.app import (
     _book_language,
     _clean_tags_for_display,
@@ -302,3 +304,95 @@ def test_desc_sequel_returns_false_for_standalone_description():
 def test_desc_sequel_empty_input():
     assert not _desc_is_sequel("")
     assert not _desc_is_sequel(None)  # type: ignore[arg-type]
+
+
+# ---- Latin-script foreign editions ------------------------------------------
+#
+# Script detection above catches a Japanese title. It cannot catch a Spanish
+# one, and Open Library's `language` field is the union of EVERY edition
+# language for a work -- _from_openlib_doc resolves it to "eng" the moment any
+# English edition exists. So a Spanish record for a translated book claims
+# English and sailed straight through the English gate.
+#
+# Measured across three real candidate pools: 115 non-English-titled records,
+# every one labelled `eng`. "Alas de ónix" reached #1 on Find Similar for both
+# Mistborn and The Hobbit in production. Its Open Library description is in
+# English too, so the title is the only per-record evidence available.
+
+from server.app import (  # noqa: E402
+    NON_ENGLISH_LANG, _title_looks_non_english,
+)
+
+
+@pytest.mark.parametrize("title", [
+    "Alas de ónix", "Das Parfum", "Les trois Mousquetaires", "El Jarama",
+    "De aanslag", "Il cimitero di Praga", "Die Vermessung der Welt",
+    "La fortune des Rougon", "Suite française", "Mémoires d'Hadrien",
+    "Röde Orm", "Ségou", "Le petit prince", "Il nome della rosa",
+    "Hrabě Monte Cristo. Díl 1 a 2",
+])
+def test_foreign_titles_are_detected(title):
+    assert _title_looks_non_english(title) is True
+
+
+@pytest.mark.parametrize("title,authors", [
+    # An English function word settles it, even with a foreign name in the
+    # title -- this one is a real pooled record and the reason the English
+    # check runs first rather than counting markers on both sides.
+    ("The Thousand Autumns of Jacob de Zoet", ["David Mitchell"]),
+    ("A Game of Thrones", ["George R. R. Martin"]),
+    ("A Christmas Carol", ["Charles Dickens"]),
+    # No markers at all -> defaults to English, which is right for this corpus.
+    ("Dune", ["Frank Herbert"]),
+    ("Mistborn", ["Brandon Sanderson"]),
+    ("Steelheart", ["Brandon Sanderson"]),
+    ("Frankenstein", ["Mary Shelley"]),
+    # Name particles are not language evidence. "Le Guin Reader" was the only
+    # false positive across 3113 pooled titles before authors were consulted.
+    ("Le Guin Reader", ["Ursula K. Le Guin"]),
+    ("A Perfect Spy", ["John le Carre"]),
+])
+def test_english_titles_survive(title, authors):
+    assert _title_looks_non_english(title, authors) is False
+
+
+def test_open_library_eng_claim_loses_to_a_spanish_title():
+    # The exact production record: a Spanish edition whose work has English
+    # editions, so OL reports language 'eng'.
+    book = _bk(
+        title="Alas de ónix",
+        description="After nearly eighteen months at Basgiath War College, "
+                    "Violet Sorrengail knows there's no more time for lessons.",
+        metadata={"language": "eng"},
+    )
+    book.authors = ["Rebecca Yarros"]
+    assert _book_language(book) == NON_ENGLISH_LANG
+
+
+def test_a_specific_non_english_claim_is_still_trusted():
+    # Only the "en" claim is fabricated by the union-of-editions logic; a
+    # provider that says "spa" means it, and that is more precise than the
+    # sentinel, so it must not be overwritten.
+    book = _bk(title="Alas de ónix", metadata={"language": "spa"})
+    book.authors = ["Rebecca Yarros"]
+    assert _book_language(book) == "es"
+
+
+def test_an_english_title_still_reports_english():
+    book = _bk(title="The Way of Kings", metadata={"language": "eng"})
+    book.authors = ["Brandon Sanderson"]
+    assert _book_language(book) == "en"
+
+
+def test_a_foreign_edition_is_excluded_from_an_english_library():
+    from server.app import _apply_language_gate
+
+    english = [_bk(title=f"The Long Road {i}", metadata={"language": "eng"})
+               for i in range(20)]
+    foreign = _bk(title="Alas de ónix", metadata={"language": "eng"})
+    foreign.authors = ["Rebecca Yarros"]
+
+    kept = _apply_language_gate([*english, foreign], {"en"})
+
+    assert foreign not in kept
+    assert len(kept) == len(english)

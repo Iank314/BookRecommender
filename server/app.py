@@ -8,6 +8,7 @@ import os
 import re
 import threading
 import time
+import unicodedata
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -2866,6 +2867,113 @@ def _norm_lang(code: str | None) -> str:
     return _LANG_ALIASES.get(c, c)
 
 
+# Returned when a record's title is plainly not English but nothing says which
+# language it *is*. Deliberately one bucket rather than a guess: the job here is
+# to keep foreign editions out of an English pool, and inventing "es" for a
+# Czech title would be a confident lie in place of a useful one. Distinct from
+# "non-latin", which means a different script rather than a different language.
+NON_ENGLISH_LANG = "non-english"
+
+# Function words that settle a title as English. Checked FIRST, because a title
+# can carry a foreign word without being foreign: "The Thousand Autumns of
+# Jacob de Zoet" is English with a Dutch surname, and it sits in the real pools
+# alongside the records this exists to catch.
+#
+# "a" is deliberately absent — it is a word in Portuguese, Italian and Czech
+# too, and including it let "Hrabě Monte Cristo. Díl 1 a 2" pass as English.
+# Nothing is lost by omitting it: an unmatched title defaults to English
+# anyway, so the set only needs to rescue titles that would otherwise trip a
+# foreign marker.
+_ENGLISH_TITLE_MARKERS = frozenset({
+    "the", "of", "and", "an", "in", "on", "at", "to", "for", "with", "from",
+    "by", "is", "are", "was", "were", "his", "her", "their", "our", "my",
+    "your", "who", "what", "when", "where", "how", "why", "that", "this",
+    "these", "those", "it", "its", "he", "she", "they", "we", "you", "not",
+    "all", "one", "two", "three", "into", "out", "up", "down", "over",
+    "under", "after", "before", "between", "against", "about", "story",
+    "stories", "book", "novel", "tale", "tales", "chronicles",
+})
+
+# Articles, prepositions and conjunctions that mark a European language.
+# Ambiguous-in-English forms ("no", "as", "os", "um", "a") are left out; the
+# rest are only consulted after the English check above has declined.
+_NON_ENGLISH_TITLE_MARKERS = frozenset({
+    # Spanish / Portuguese
+    "el", "los", "las", "una", "unos", "unas", "del", "por", "para", "con",
+    "uma", "dos", "das", "seu", "sua", "muerte", "vida",
+    # French
+    "le", "les", "des", "du", "au", "aux", "dans", "sur", "avec", "chez",
+    # Italian
+    "il", "lo", "gli", "della", "delle", "dei", "degli", "nel", "col", "di",
+    # German
+    "der", "die", "das", "den", "dem", "und", "ein", "eine", "einen", "im",
+    "zum", "zur", "von", "mit",
+    # Dutch
+    "het", "een", "van", "voor", "aanslag",
+    # Shared Romance
+    "de", "la", "en", "et", "e",
+})
+
+# Letters that no English word carries natively. Combining marks cover the
+# accented Latin range generically (é, ě, ñ, ö, ř); the explicit set catches
+# the ones that are single codepoints with no decomposition, so NFD finds no
+# mark to test.
+_NON_ENGLISH_LETTERS = frozenset("øßłđðþıŋœæåÅØ")
+
+
+def _title_has_diacritics(title: str) -> bool:
+    decomposed = unicodedata.normalize("NFD", title)
+    if any(unicodedata.combining(ch) for ch in decomposed):
+        return True
+    return any(ch in _NON_ENGLISH_LETTERS for ch in title)
+
+
+def _title_looks_non_english(title: str, authors: list[str] | tuple = ()) -> bool:
+    """Whether a Latin-script title is plainly not in English.
+
+    Needed because Open Library's `language` field is the union of EVERY
+    edition language for a work, and _from_openlib_doc resolves it to "eng"
+    whenever any English edition exists. So a Spanish record for a book with an
+    English translation claims English. Measured across three candidate pools:
+    115 non-English-titled records, every single one labelled `eng`.
+
+    The description cannot help — Open Library gives "Alas de ónix" an English
+    blurb ("After nearly eighteen months at Basgiath War College...") — so the
+    title is the only per-record evidence there is.
+
+    English markers win over foreign ones deliberately, rather than counting
+    both sides: the asymmetry is what keeps "The Thousand Autumns of Jacob de
+    Zoet" in an English pool while dropping "Il cimitero di Praga". A title
+    matching nothing at all falls through to English, which is the safe
+    default for a corpus that is overwhelmingly English.
+
+    `authors` matters because a name particle is not language evidence. "Le
+    Guin Reader" is English; the "Le" belongs to Ursula K. Le Guin, and it was
+    the only false positive across 3113 pooled titles. The same rescue covers
+    le Carré, de Lint, van Gogh and da Vinci. Author words are removed before
+    both the marker test and the diacritic test, so an accented surname in the
+    title ("Márquez") cannot convict it either.
+    """
+    words = set(re.findall(r"[^\W\d_]+", title.lower(), flags=re.UNICODE))
+    if not words:
+        return False
+    if words & _ENGLISH_TITLE_MARKERS:
+        return False
+
+    author_words: set[str] = set()
+    for a in authors or ():
+        author_words |= set(
+            re.findall(r"[^\W\d_]+", (a or "").lower(), flags=re.UNICODE))
+
+    if (words - author_words) & _NON_ENGLISH_TITLE_MARKERS:
+        return True
+    residual = " ".join(
+        w for w in re.findall(r"[^\W\d_]+", title, flags=re.UNICODE)
+        if w.lower() not in author_words
+    )
+    return _title_has_diacritics(residual)
+
+
 def _book_language(book: Books) -> str | None:
     """Best guess at a book's language: title script is dispositive, with
     metadata only consulted when the title is Latin-script.
@@ -2893,6 +3001,18 @@ def _book_language(book: Books) -> str | None:
     # Latin-script title — now consult metadata, fall back to Latin/non-Latin
     # ratio if nothing is recorded.
     code = _norm_lang((book.metadata or {}).get("language"))
+    if code and code != "en":
+        # A specific non-English claim is trustworthy: providers only say "spa"
+        # when they mean it. It is the "en" claim that gets fabricated, because
+        # Open Library resolves a work's whole edition-language list to "eng"
+        # as soon as one English edition exists.
+        return code
+    # Metadata says English, or says nothing. Check the title before believing
+    # it — this is the same principle as the script test above (the title is
+    # the evidence, metadata is the claim), one level down: script catches a
+    # Japanese title, this catches a Spanish one.
+    if _title_looks_non_english(book.title or "", book.authors or ()):
+        return NON_ENGLISH_LANG
     if code:
         return code
     latin = len(re.findall(r"[A-Za-z]", probe))
