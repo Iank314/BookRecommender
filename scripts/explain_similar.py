@@ -27,14 +27,19 @@ from scripts._lookup import find_source as _find_source
 from server.fetcher.fetcher import google_books_status
 from server.app import (
     SimilarRequest,
+    W_DESC,
+    W_GENRE,
+    _MIN_SOURCE_TEXT_TOKENS,
+    _blend_genre_desc,
     _book_popularity,
     _compute_token_idf,
     _gather_similar_candidates,
     _genre_atoms,
-    _genre_score,
     _idf_weighted_f1,
+    _is_synthesized_blurb,
     _content_tokens,
     _score_similar_candidates,
+    _similar_genre_score,
 )
 
 
@@ -89,24 +94,61 @@ def main() -> None:
         raise SystemExit("No candidate scored above zero.")
 
     # Recompute the scorer's internals so each line can show its breakdown.
+    #
+    # Every term below must come from the function _score_similar_candidates
+    # actually calls, or the breakdown explains a score the endpoint never
+    # computed — which defeats the entire point of the tool. The genre term is
+    # the one that bit: this printed _genre_score, which is
+    # /library/recommend's measure. That one divides by the *candidate's* tag
+    # count and inverts the ranking (measured on The Hobbit: The Very Hungry
+    # Caterpillar 0.33 vs A Wizard of Earthsea 0.25, the picture book winning
+    # for having fewer tags to divide by). /similar has used
+    # _similar_genre_score since precisely that was fixed, so the column was
+    # showing the discarded metric on the term carrying 40% of the blend.
     idf = _compute_token_idf(candidates)  # content tokens — see _content_tokens
     default_idf = math.log(len(candidates) + 1) + 1
     src_text = _content_tokens(source_book)
+    source_has_text = len(src_text) >= _MIN_SOURCE_TEXT_TOKENS
+    if not source_has_text:
+        print(f"\n  !! Source has {len(src_text)} content token(s), under the "
+              f"{_MIN_SOURCE_TEXT_TOKENS} needed to rank on text.")
+        print("     Everything below is scored on genre alone, so candidates")
+        print("     sharing a genre will tie — read the genre column, not desc.")
 
     for rank, (cand, final) in enumerate(scored[: args.top], start=1):
         cand_text = _content_tokens(cand)
-        desc = _idf_weighted_f1(src_text, cand_text, idf, default_idf)
-        cand_genres = set(_genre_atoms(cand.tags)[0])
-        genre = (
-            f"{_genre_score(cand_genres, src_spec):.3f}"
-            if cand_genres and src_spec else "n/a"
+        # A synthesised Open Library blurb ("First published in 2012. | By
+        # ...") is not evidence, and the scorer zeroes its description term.
+        # Showing the raw F1 would credit a match the ranking never granted.
+        cand_has_text = not _is_synthesized_blurb(cand.description)
+        desc = (
+            _idf_weighted_f1(src_text, cand_text, idf, default_idf)
+            if cand_has_text else 0.0
         )
+        desc_note = "" if cand_has_text else " (boilerplate, zeroed)"
+        cand_genres = set(_genre_atoms(cand.tags)[0])
+        # Genre is consulted only when both sides carry tags — the same
+        # condition _blend_genre_desc branches on.
+        has_genres = bool(cand_genres and src_spec)
+        genre_score = _similar_genre_score(cand_genres, src_spec)
+        combined = _blend_genre_desc(
+            genre_score, desc,
+            has_genres=has_genres, source_has_text=source_has_text,
+        )
+        if not has_genres:
+            blend = "desc only (one side is tagless)"
+        elif not source_has_text:
+            blend = "genre only (source has no usable text)"
+        else:
+            blend = f"{W_GENRE:g}*genre + {W_DESC:g}*desc"
+        genre = f"{genre_score:.3f}" if has_genres else "n/a"
         shared = sorted(
             src_text & cand_text, key=lambda t: -idf.get(t, default_idf),
         )[:8]
         print(f"\n{rank:2}. {cand.title} — {', '.join(cand.authors) or '?'}")
-        print(f"    final {final:.3f} | desc F1 {desc:.3f} | genre {genre} "
-              f"| pop {_book_popularity(cand):.2f}")
+        print(f"    final {final:.3f} | desc F1 {desc:.3f}{desc_note} "
+              f"| genre {genre} | pop {_book_popularity(cand):.2f}")
+        print(f"    {blend} = {combined:.3f}, then x popularity = {final:.3f}")
         print(f"    genres: {sorted(cand_genres) or '(tagless)'}")
         print(f"    top shared content tokens: {', '.join(shared) or '(none)'}")
 
