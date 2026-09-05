@@ -1,8 +1,12 @@
-numpy>=1.24,<2.0
-scipy>=1.10,<2.0
-scikit-learn>=1.3,<2.0
 requests>=2.28,<3.0
 fastapi>=0.100,<1.0
 uvicorn>=0.23,<1.0
 jinja2>=3.1,<4.0
 pytest>=7.0,<9.0
+# Required by starlette's TestClient, which tests/test_referrer.py uses to
+# drive the app. Not a runtime dependency, but it belongs next to pytest for
+# the same reason pytest is here at all: `pip install -r requirements.txt`
+# has to produce an environment where `python -m pytest` passes, and
+# scripts/deploy.ps1 gates every deploy on exactly that. Without it those six
+# tests error out on a clean machine with an import failure, not a real one.
+httpx>=0.24,<1.0

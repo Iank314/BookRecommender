@@ -14,8 +14,8 @@
 # genres this recommender scores well. That's not an accident of taste — the
 # same popular titles are the ones with rich Google Books / Open Library
 # metadata, which is exactly what the scorer needs. Obscure and self-published
-# serials (the known data wall in CLAUDE.md) will fail the publish gate and
-# waste a lookup, so leave them out.
+# serials (the data wall described under "Structural gap" in the README) will
+# fail the publish gate and waste a lookup, so leave them out.
 #
 # Roughly half of these clear the publish gate on a given run; that's the gate
 # working, not a bug. Adding lines here is the main growth lever — every new

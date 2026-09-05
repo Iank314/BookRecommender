@@ -46,8 +46,6 @@ from server.fetcher.fetcher import (
     google_books_status,
 )
 from server.models.book import Books
-from server.recommender.recommendation_engine import RecommendationEngine
-from server.recommender.recommender import Recommender
 from server.seo import (
     CORE_GENRES,
     DEFAULT_BASE_URL,
@@ -112,10 +110,6 @@ BlurbStr = constr(max_length=8_000)
 Username = constr(strip_whitespace=True, min_length=2, max_length=32)
 Password = constr(min_length=6, max_length=128)
 Category = Literal["title", "author", "genre", "general"]
-RemoteSource = Literal[
-    "https://www.googleapis.com/books/v1/volumes",
-    "https://openlibrary.org/search.json",
-]
 
 app = FastAPI(title="Book Recommender API")
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
@@ -212,13 +206,6 @@ class BookOut(BaseModel):
     reading_status: Literal["want_to_read", "reading", "read"] | None = None
 
 
-class BuildRequest(BaseModel):
-    query: NonEmptyStr = "coming-of-age fantasy"
-    max_results: int = Field(40, ge=1, le=200)
-    source: RemoteSource = GOOGLE_ENDPOINT
-    category: Category = "general"
-
-
 class SearchRequest(BaseModel):
     query: NonEmptyStr
     category: Category = "general"
@@ -251,20 +238,6 @@ def _year_in_range(book, lo: int | None, hi: int | None) -> bool:
     if year is None:
         return False
     return (lo is None or year >= lo) and (hi is None or year <= hi)
-
-
-@app.post("/build", summary="Build the recommendation index")
-def build_index(req: BuildRequest):
-    """Fetch books and build the similarity index (legacy TF-IDF pipeline)."""
-    fetcher = Fetcher(source=req.source)
-    engine = RecommendationEngine()
-    rec = Recommender(fetcher, engine)
-    try:
-        rec.build(query=req.query, max_results=req.max_results,
-                  category=req.category)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to build index: {exc}")
-    return {"status": "ok", "books_indexed": len(rec.library.all())}
 
 
 class SearchResponse(BaseModel):
@@ -584,14 +557,14 @@ MIN_SIMILAR_SCORE = 0.15
 # one book and nothing measurable on the others, because the time goes on
 # round-trips rather than payload. The offline page generator has no latency
 # budget to protect, so it reaches further still.
+SIMILAR_OL_BATCH = 700
+SEO_OL_BATCH = 1000
+
 # Google Books pages to pull when Open Library returns nothing for a query.
 # Google caps one response at 40 records, so a single page can't stand in for
 # Open Library's 700-1000. Five pages rebuilds a workable pool without pulling
 # them on every healthy request, where they'd be wasted quota.
 _GB_FALLBACK_PAGES = 5
-
-SIMILAR_OL_BATCH = 700
-SEO_OL_BATCH = 1000
 
 # Below this many folded tokens, a source's description is provider boilerplate
 # rather than a blurb ("First published in 2000. | By ..."), and ranking
@@ -973,8 +946,9 @@ def _gather_similar_candidates(
     author_surnames = {s for s in map(_author_surname, req.authors) if len(s) > 2}
 
     with ThreadPoolExecutor(max_workers=min(8, len(genre_queries))) as ex:
-        # OL batch 300 (vs recommend's default 200): a single source book gets
-        # fewer queries, so each casts a wider net into OL's long tail.
+        # SIMILAR_OL_BATCH (700, vs recommend's default 200): a single source
+        # book gets fewer queries, so each casts a wider net into OL's long
+        # tail. SEO_OL_BATCH reaches further still — see those constants.
         fetched = list(ex.map(
             lambda q: _fetch_genre_candidates(q, ol_batch=ol_batch), genre_queries))
     for books in fetched:
@@ -2696,11 +2670,12 @@ _GENRE_PARENTS: dict[str, tuple[str, ...]] = {
 # sequels. The same shape put Regency romances on Mexican Gothic — matching
 # `historical` counted as much as matching `gothic`.
 #
-# Deliberately a static table rather than corpus IDF. CLAUDE.md's warning
-# holds: candidates are fetched *by* genre, so the genre you care about is
-# common within the pool and IDF weights it down — the opposite of what's
-# wanted. Specificity is a property of the vocabulary, not of the pool, so it
-# is curated here alongside CORE_GENRES and inspectable.
+# Deliberately a static table rather than corpus IDF, and this is the one
+# thing to remember before "improving" it: candidates are fetched *by* genre,
+# so the genre you care about is common within the pool and IDF weights it
+# down — the exact opposite of what's wanted. Specificity is a property of the
+# vocabulary, not of the pool, so it is curated here alongside CORE_GENRES and
+# stays inspectable.
 _GENRE_WEIGHT_DEFAULT = 2.0
 _GENRE_WEIGHTS = {
     # Broad shelves and formats. True of enormous numbers of books, so sharing
@@ -3957,9 +3932,13 @@ _templates = Environment(
 # when running somewhere other than production so those URLs aren't wrong.
 BASE_URL = os.environ.get("BOOKREC_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
 
-# Static asset version for the public pages — bump alongside the ?v= in
-# index.html so a redeploy can't serve these pages a stale stylesheet.
-SEO_ASSET_VERSION = 15
+# There is deliberately no asset-version constant here. base.html inlines its
+# CSS rather than linking the SPA's stylesheet (see the comment at the top of
+# that template), so these pages load no cache-busted asset and have nothing to
+# version. A SEO_ASSET_VERSION used to be passed to every render and read by no
+# template — it drifted to 15 against index.html's ?v=16 without any effect,
+# because there was never anything for it to do. The SPA's own ?v= in
+# index.html is a separate thing and still needs bumping.
 
 
 @app.get("/books-like", include_in_schema=False)
@@ -3979,7 +3958,6 @@ def books_like_index(
     html = _templates.get_template("books_like_index.html").render(
         pages=pages,
         canonical=f"{BASE_URL}/books-like",
-        asset_version=SEO_ASSET_VERSION,
     )
     return HTMLResponse(html)
 
@@ -3995,9 +3973,7 @@ def books_like_page(
     _record_visit(request, bookrec_session)
     page = seo_store.get(slug)
     if page is None:
-        html = _templates.get_template("not_found.html").render(
-            asset_version=SEO_ASSET_VERSION,
-        )
+        html = _templates.get_template("not_found.html").render()
         return HTMLResponse(html, status_code=404)
 
     # Link a result onward only when it has its own page — a link to a 404
@@ -4014,7 +3990,6 @@ def books_like_page(
         results=results,
         canonical=page_url(slug, BASE_URL),
         generated_at=page["generated_at"],
-        asset_version=SEO_ASSET_VERSION,
         jsonld=_books_like_jsonld(page["source_title"], results),
     )
     return HTMLResponse(html)

@@ -9,8 +9,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install dependencies first so the heavy scikit-learn/scipy wheels stay cached
-# across code edits.
+# Install dependencies before copying code so the layer stays cached across
+# code edits.
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 

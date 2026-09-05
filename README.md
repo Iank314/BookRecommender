@@ -18,7 +18,7 @@
 - **Popularity-weight the `explain_similar` source lookup** — the tuning tool's `_find_source` matches on title only, so a common title can resolve to an obscure edition (querying "Circe" grabbed a 1677 opera instead of Madeline Miller's novel). Preferring a popularity-weighted match would make the debug tool reflect what users actually click. Tooling-only — the live `/similar` endpoint uses the user's clicked book, so it's unaffected.
 - **Series-name extraction from prose** — today, when a candidate's title carries no volume marker but the description says *"the fourth book in the Hitchhiker's Trilogy"*, the recommender drops the candidate rather than recommend a stranger to start mid-series. Better: extract the series name from phrases like *"in the X Trilogy"* / *"part of the Y series"* and run the existing `_entry_point_book` lookup against it, so book 1 gets swapped in instead of the sequel being dropped. The hard part is keeping false positives low (*"in the tradition of the X series"*, *"like the Y trilogy"*).
 - **Smarter nonfiction/homonym filtering** — catch tagless nonfiction and homonym genres (e.g. "magic" the occult topic vs. fantasy magic, "cultivation" the agriculture topic vs. the xianxia genre) by curating nonfiction subject markers and weighting specific genres over broad ones
-- **Semantic similarity (embeddings)** — sentence-embed descriptions for better "writing style" matching than token overlap. Gated: only when `python -m scripts.explain_similar "<title>"` sessions show bad recommendations driven by legitimate story vocabulary meaning different things in context (so far every bad rec has traced to data quality or normalization, all fixable in token land — see CLAUDE.md "Recommendation quality tuning")
+- **Semantic similarity (embeddings)** — sentence-embed descriptions for better "writing style" matching than token overlap. Gated: only when `python -m scripts.explain_similar "<title>"` sessions show bad recommendations driven by legitimate story vocabulary meaning different things in context (so far every bad rec has traced to data quality or normalization, all fixable in token land — the tuning levers are listed in the [explain_similar.py](scripts/explain_similar.py) docstring)
 
 **Search coverage & data sources**
 
@@ -54,7 +54,7 @@ A full-stack book recommendation system that searches **Google Books** and **Ope
 | Layer | Technology | Why |
 |-------|------------|-----|
 | Backend | **Python 3.11, FastAPI, Uvicorn** | Async-ready API with automatic docs |
-| Data & NLP | **scikit-learn, NumPy, SciPy** | TF-IDF index for the build pipeline; live recommendations use IDF-weighted token-set similarity (pure stdlib) |
+| Data & NLP | **Python standard library** | IDF-weighted token-set similarity, genre-atom overlap, series/language heuristics — no ML dependency. An earlier scikit-learn TF-IDF + cosine implementation was removed: plain cosine collapsed across the differing vocabularies of Google Books and Open Library, and nothing on a request path had used it since |
 | Storage | **SQLite** | Per-user accounts and saved libraries, single-file DB |
 | Auth | **stdlib `hashlib` (PBKDF2) + `secrets`** | Salted password hashing and session tokens, no extra dependencies |
 | HTTP | **requests + ThreadPoolExecutor** | REST client for Google Books & Open Library; genre queries and enrichment run concurrently, with a TTL response cache, a Google Books concurrency cap, and 429 backoff/cooldown |
@@ -168,35 +168,21 @@ BookRecommender/
 │   ├── app.py              FastAPI REST API (auth, search, similar, library)
 │   ├── auth_throttle.py    Per-username failed-login throttle
 │   ├── models/
-│   │   ├── book.py         Book dataclass
-│   │   └── library.py      In-memory collection used inside the recommender pipeline
+│   │   └── book.py         Book dataclass
 │   ├── storage/
 │   │   ├── feedback_db.py  SQLite per-user thumbs-up / thumbs-down store
 │   │   ├── library_db.py   SQLite per-user saved-library store
 │   │   └── users_db.py     SQLite accounts + login sessions (PBKDF2 hashing)
 │   ├── cache/
 │   │   └── rec_cache.py    In-process LRU cache for library recommendations
-│   ├── fetcher/
-│   │   └── fetcher.py      Google Books + Open Library adapters (search + work-detail enrichment)
-│   ├── preprocessing/
-│   │   └── text_processor.py   HTML/URL stripping, lowercasing, cleanup
-│   ├── features/
-│   │   └── features.py     TF-IDF vectorizer + tag one-hot encoder
-│   └── recommender/
-│       ├── recommendation_engine.py   Cosine similarity engine
-│       └── recommender.py            Full pipeline orchestrator
+│   └── fetcher/
+│       └── fetcher.py      Google Books + Open Library adapters (search + work-detail enrichment)
 ├── data/
 │   └── library.db          SQLite database (accounts, sessions, libraries) — created on first run
 ├── scripts/
-│   ├── demo_query.py       CLI demo
 │   └── explain_similar.py  Tuning tool: score breakdown for "Find Similar"
-├── tests/
-│   ├── test_auth_throttle.py
-│   ├── test_engine.py
-│   ├── test_feedback_store.py
-│   ├── test_pipeline.py
-│   ├── test_rec_cache.py
-│   └── test_recommender_edge.py
+├── tests/                  24 modules — scoring, candidate filters, stores,
+│                           caches, auth, SEO pages, referrers, routes
 ├── requirements.txt
 └── README.md
 ```
@@ -305,19 +291,13 @@ The script connects via the SSH alias `iansbookrecs`, defined in the operator's 
 ssh iansbookrecs "cd app && git pull && sudo docker compose -f docker-compose.prod.yml up -d --build"
 ```
 
-Frontend changes: remember to bump the `?v=N` query strings in `index.html`. Payload-shape or scoring changes: bump `CACHE_VERSION` in `server/cache/rec_cache.py` (see CLAUDE.md).
+Frontend changes: remember to bump the `?v=N` query strings in `index.html`. Payload-shape or scoring changes: bump `CACHE_VERSION` in [rec_cache.py](server/cache/rec_cache.py) and add a line to the version log above it saying what changed — the log is what makes a stale bump visible later.
 
 **Operational notes:**
 - The database is `~/app/data/library.db` **on the server** — the laptop copy is dev/test data now; they diverged at migration. Never deploy by copying a local DB over the server's.
 - Useful: `sudo docker compose -f docker-compose.prod.yml logs -f bookrec` (live request log), `logs caddy` (cert issuance), `ps` (status).
 - Costs: $12/mo instance (first 90 days free) + ~$13/yr domain. Static IP free while attached.
 - Backlog: enable Lightsail automatic snapshots for backups. (`GOOGLE_BOOKS_API_KEY` is already set on the server — check `google_books` in `GET /admin/stats` rather than trusting this list.)
-
-### CLI Demo
-
-```bash
-python -m scripts.demo_query
-```
 
 ### Run Tests
 

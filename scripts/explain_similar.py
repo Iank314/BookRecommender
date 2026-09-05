@@ -3,9 +3,16 @@
 This is the tuning loop for recommendation quality: run it on a book that gave
 a bad recommendation, read the breakdown — genre overlap vs description F1 vs
 popularity, and which shared tokens drove each match — then adjust the right
-lever (stopwords, genre synonyms, blend weights, candidate queries). It calls
-the exact pipeline the /similar endpoint uses, so what it shows is what users
-get. See CLAUDE.md "Recommendation quality tuning" for the lever list.
+lever. It calls the exact pipeline the /similar endpoint uses, so what it
+shows is what users get.
+
+The levers, in the order they're usually the answer, all in server/app.py:
+  _GENRE_SYNONYMS      two vocabularies naming one genre ("sci-fi"/"Science Fiction")
+  _GENRE_NOISE_ATOMS   subject facets that aren't genres ("New York Times bestseller")
+  _GENRE_PARENTS       a subgenre that should match its parent ("high fantasy")
+  _GENRE_WEIGHTS       how much sharing a given genre proves ("litrpg" >> "adventure")
+  _SIM_STOPWORDS       tokens driving matches that mean nothing
+  W_GENRE / W_DESC     the blend itself — change last, it moves every book
 
 Usage:
     python -m scripts.explain_similar "Dungeon Crawler Carl"

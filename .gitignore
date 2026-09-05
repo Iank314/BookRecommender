@@ -15,3 +15,5 @@ data/
 *.db-journal
 *.db-wal
 *.db-shm
+# Local virtualenv
+.venv/

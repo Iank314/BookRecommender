@@ -18,7 +18,23 @@ Set-Location (Join-Path $PSScriptRoot "..")
 
 if (-not $SkipTests) {
     Write-Host "[1/4] Running tests..." -ForegroundColor Cyan
-    python -m pytest -q
+    # Deliberately the project venv, not a bare `python`. This gate is only
+    # worth anything if it runs against the dependency set that builds the
+    # image, and `python` means whatever is first on PATH — which on a fresh
+    # machine is the global interpreter. That is not hypothetical: the suite
+    # once passed here purely because the project's dependencies had been
+    # installed globally by accident, so the gate was testing an environment
+    # production would never have. Failing loudly beats passing dishonestly.
+    $py = Join-Path $PSScriptRoot "..\.venv\Scripts\python.exe"
+    if (-not (Test-Path $py)) {
+        throw @"
+No .venv found at $py
+Create one, then re-run:
+  python -m venv .venv
+  .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+"@
+    }
+    & $py -m pytest -q
     if ($LASTEXITCODE -ne 0) { throw "Tests failed - not deploying." }
 } else {
     Write-Host "[1/4] Skipping tests." -ForegroundColor Yellow

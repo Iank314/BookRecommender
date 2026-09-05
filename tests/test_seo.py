@@ -228,9 +228,9 @@ def test_page_url_builds_a_canonical_link():
 # --------------------------------------------------------------- rendering
 
 def _render(name, **ctx):
-    from server.app import SEO_ASSET_VERSION, _templates
+    from server.app import _templates
 
-    return _templates.get_template(name).render(asset_version=SEO_ASSET_VERSION, **ctx)
+    return _templates.get_template(name).render(**ctx)
 
 
 def _page_ctx(**overrides):

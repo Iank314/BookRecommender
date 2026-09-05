@@ -36,7 +36,15 @@ from typing import Any, Callable, Iterable
 # v9: /similar's genre queries now share _genre_atoms' tag cleanup (facet
 #     prefixes dropped, trailing periods stripped, "Fiction." recognised as
 #     generic), changing /similar's candidate pools and therefore its results.
-CACHE_VERSION = 9
+# v10: catch-up bump. Six scoring mechanisms landed while this constant sat at
+#     9, every one of them re-ranking output: subgenre->parent subsumption
+#     (_GENRE_PARENTS, so `high fantasy` finally matches `fantasy`), genre
+#     specificity weighting (_GENRE_WEIGHTS), audience turned from a reward
+#     into a conflict penalty (_audience_conflict), synthesised Open Library
+#     blurbs zeroed instead of scored (_is_synthesized_blurb), a record-quality
+#     tie-break in /search (_record_quality), and title-script language
+#     detection (_title_looks_non_english).
+CACHE_VERSION = 10
 
 
 class RecommendationCache:
