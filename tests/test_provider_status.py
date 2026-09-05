@@ -64,6 +64,9 @@ def gb_429(monkeypatch):
 
 
 def test_a_quota_refusal_is_recorded(gb_429):
+    # Exercises the KEYLESS branch of _describe_gb_refusal, so it depends on
+    # GOOGLE_BOOKS_API_KEY being unset — which conftest's _isolate_google_key
+    # guarantees rather than leaving to whether this machine has a `.env`.
     f = fetcher.Fetcher(source=fetcher.GOOGLE_ENDPOINT)
     books, total = f.fetch_google_page("Mistborn", category="title")
 

@@ -21,6 +21,24 @@ def make_book(book_id: str, title: str = "T", tags: list[str] | None = None) -> 
     )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_google_key(monkeypatch):
+    """Keep the suite independent of whether this machine has a `.env`.
+
+    server/__init__.py loads `.env` into os.environ at import time, by design —
+    so a developer with a real GOOGLE_BOOKS_API_KEY had it leak into every
+    test. That is not hypothetical: it silently flipped `_describe_gb_refusal`
+    onto its has_key branch and failed test_a_quota_refusal_is_recorded on a
+    laptop while passing everywhere a key was absent. A deploy gate that
+    depends on the operator's dotfiles is worse than no gate, because it fails
+    on the machine that is trying to ship.
+
+    Tests that care about the key set it themselves (monkeypatch.setenv), and
+    still can — this only removes the ambient value.
+    """
+    monkeypatch.delenv("GOOGLE_BOOKS_API_KEY", raising=False)
+
+
 @pytest.fixture
 def store(tmp_path: Path) -> LibraryStore:
     """Fresh LibraryStore on a tmp DB. test_feedback_store shadows this with
