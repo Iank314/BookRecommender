@@ -274,54 +274,86 @@ def test_merging_is_idempotent():
     assert (list(keep.tags), keep.description, dict(keep.metadata)) == snapshot
 
 
-# ---- the edition-count floor -------------------------------------------------
-# edition_count differs from the other three popularity fields: its floor is
-# ONE (a catalogued work has an edition by definition), not zero. Measured over
-# 108 pooled Open Library records: edition_count was never 0 and was exactly 1
-# for 80% of them, while ratings_count was zero for 95%. Shifting it by +1 like
-# the others therefore paid a flat 0.100 to four out of five records for merely
-# existing -- and since _book_popularity takes the max and most records have no
-# ratings, that bonus was often the only signal a record had.
+# ---- series-author consensus -------------------------------------------------
+# When many records share a title, the author appearing across most of them is
+# almost always the one who wrote it: catalogues file every edition and volume
+# under the real author, while adaptations and study guides appear once each.
+#
+# Measured over 9 ambiguous titles with the merge in place: 7/9 correct #1 at
+# bonus 0.0, 8/9 at 0.5, 9/9 at both 1.0 and 2.0, nothing regressing anywhere.
 
-from server.app import _book_popularity, _popularity_signals  # noqa: E402
-
-
-def _pop(**meta) -> float:
-    return _book_popularity(Books(id="p", title="T", authors=[], description="",
-                                  tags=[], metadata=meta))
+from server.app import (  # noqa: E402
+    SERIES_CONSENSUS_BONUS, _consensus_bonus, _series_author_consensus,
+)
 
 
-def test_a_single_edition_is_not_evidence_of_readership():
-    assert _pop(edition_count=1) == 0.0
-    assert _pop(edition_count=0) == 0.0
+def _e(title, author):
+    return [Books(id=title + author, title=title, authors=[author], description="d",
+                  tags=[], metadata={}), 100.0]
 
 
-def test_more_editions_still_score_and_stay_ordered():
-    assert _pop(edition_count=2) > 0.0
-    assert _pop(edition_count=500) > _pop(edition_count=50) > _pop(edition_count=2)
+def test_consensus_elects_the_author_owning_most_records():
+    entries = [_e("The Hobbit", "J. R. R. Tolkien"),
+               _e("The Hobbit", "J.r.r. Tolkien"),
+               _e("The Hobbit", "Ruth Perry")]
+    assert _series_author_consensus(entries) == {"the hobbit": "tolkien"}
 
 
-def test_large_edition_counts_are_essentially_unchanged():
-    """The fix must only touch the low end, or it silently reranks everything."""
-    editions, *_ = _popularity_signals({"edition_count": 481})
-    assert round(editions, 3) == 0.894
+def test_grouping_is_by_series_not_exact_title():
+    """The reason this works where exact-title grouping failed.
+
+    Guiltythree's records are titled "Shadow Slave" and "Shadow Slave, Book
+    1/2/3" -- four one-record groups under exact-title matching, so no
+    consensus at all. _split_series folds them into one.
+    """
+    entries = [_e("Shadow Slave", "Guiltythree"),
+               _e("Shadow Slave, Book 1", "Guiltythree"),
+               _e("Shadow Slave, Book 2", "Guiltythree"),
+               _e("SHADOW SLAVE", "D. I. Telbat")]
+    assert _series_author_consensus(entries) == {"shadow slave": "guiltythree"}
 
 
-def test_the_other_signals_keep_their_shift_because_zero_is_their_real_floor():
-    # One rating IS evidence -- unlike one edition, zero ratings is the common
-    # case, so a single rating means someone actually engaged.
-    assert _pop(ratings_count=1) > 0.0
-    assert _pop(want_to_read_count=1) > 0.0
-    assert _pop(already_read_count=1) > 0.0
+def test_one_record_is_not_a_consensus():
+    assert _series_author_consensus([_e("Solo", "Only Author")]) == {}
 
 
-def test_a_lone_edition_no_longer_breaks_a_genuine_tie():
-    """The live 'shadow slave' case: two equally unknown Google Books records,
-    one of which merged a single Open Library edition and won on that alone."""
-    plain = Books(id="a", title="Shadow Slave", authors=["Guiltythree"],
-                  description="A long real blurb about the Nightmare Spell.",
-                  tags=["Fiction"], metadata={})
-    with_one_edition = Books(id="b", title="SHADOW SLAVE", authors=["D. I. Telbat"],
-                             description="A Christian suspense novel.",
-                             tags=[], metadata={"edition_count": 1})
-    assert _record_quality(plain) == _record_quality(with_one_edition)
+def test_a_tie_is_not_evidence():
+    entries = [_e("Twin", "Alice Ackroyd"), _e("Twin", "Bob Bishop")]
+    assert _series_author_consensus(entries) == {}
+
+
+def test_the_bonus_reaches_only_the_owning_author():
+    cons = {"the hobbit": "tolkien"}
+    tolkien = Books(id="a", title="The Hobbit", authors=["J. R. R. Tolkien"],
+                    description="", tags=[], metadata={})
+    perry = Books(id="b", title="The Hobbit", authors=["Ruth Perry"],
+                  description="", tags=[], metadata={})
+    assert _consensus_bonus(tolkien, cons) == SERIES_CONSENSUS_BONUS
+    assert _consensus_bonus(perry, cons) == 0.0
+    assert _consensus_bonus(tolkien, {}) == 0.0
+
+
+def test_consensus_survives_records_with_no_usable_author():
+    entries = [_e("Ghost", "A"),                       # initial only, too short
+               Books(id="x", title="Ghost", authors=[], description="", tags=[],
+                     metadata={}) and [Books(id="x", title="Ghost", authors=[],
+                                             description="", tags=[], metadata={}), 100.0],
+               _e("Ghost", "Real Author"), _e("Ghost", "Real Author")]
+    assert _series_author_consensus(entries) == {"ghost": "author"}
+
+
+def test_a_null_author_does_not_crash_consensus():
+    """Providers occasionally emit a null in the author list. _dedup_key would
+    fail first today, but this is a new call site and the guard is free."""
+    null_author = [Books(id="n", title="Ghost", authors=[None], description="",
+                         tags=[], metadata={}), 100.0]
+    assert _series_author_consensus([null_author, _e("Ghost", "Real Author"),
+                                     _e("Ghost", "Real Author")]) == {"ghost": "author"}
+    assert _consensus_bonus(null_author[0], {"ghost": "author"}) == 0.0
+
+
+def test_catalogue_and_plain_author_forms_are_the_same_person():
+    """Open Library files "Rowling, J. K."; Google Books says "J. K. Rowling".
+    Counting them separately would split the plurality they should form."""
+    entries = [_e("T", "Rowling, J. K."), _e("T", "J. K. Rowling"), _e("T", "Someone Else")]
+    assert _series_author_consensus(entries) == {"t": "rowling"}

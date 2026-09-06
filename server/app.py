@@ -261,8 +261,12 @@ def search(
     query_lower = req.query.lower().strip()
 
     THRESHOLD = 50.0 if req.category == "genre" else 60.0
-    seen_keys: set[str] = set()
-    accepted: list[tuple] = []  # (book, score)
+    # dedup_key -> the accepted [book, score] entry, or None for a key that was
+    # seen and rejected. A dict rather than a set so that a duplicate arriving
+    # from the second provider can be merged into the record we already hold
+    # instead of being thrown away — see _merge_duplicate for why that matters.
+    seen: dict[str, list | None] = {}
+    accepted: list[list] = []  # [book, score]; mutable so a merge can re-score
     provider_errors: list[str] = []
 
     def _accept(books) -> None:
@@ -270,14 +274,27 @@ def search(
         # threshold — so a filter added for one source can't miss the other.
         for book in books:
             dedup_key = _dedup_key(book)
-            if dedup_key in seen_keys:
+            if dedup_key in seen:
+                entry = seen[dedup_key]
+                # A rejected key stays rejected: re-testing the duplicate would
+                # let a book the year filter excluded back in through the other
+                # provider. Only an accepted record absorbs the duplicate.
+                if entry is not None and _merge_duplicate(entry[0], book):
+                    # Merging can add tags, and the genre category scores on
+                    # tags, so re-score rather than keep a number derived from
+                    # strictly less information than the record now carries.
+                    entry[1] = _score_book(entry[0], query_lower, req.category)
                 continue
-            seen_keys.add(dedup_key)
             if not _year_in_range(book, req.year_from, req.year_to):
+                seen[dedup_key] = None
                 continue
             score = _score_book(book, query_lower, req.category)
-            if score >= THRESHOLD:
-                accepted.append((book, score))
+            if score < THRESHOLD:
+                seen[dedup_key] = None
+                continue
+            entry = [book, score]
+            seen[dedup_key] = entry
+            accepted.append(entry)
 
     # --- 1) Google Books (up to 120 results via 3 pages of 40) ---
     gb_fetcher = Fetcher(source=GOOGLE_ENDPOINT)
@@ -326,7 +343,13 @@ def search(
     # beyond the search page: /similar takes whatever ranked first as its
     # source, and a record with no author and no real genre sent the novel's
     # recommendations into books about Napoleon.
-    accepted.sort(key=lambda x: (x[1], _record_quality(x[0])), reverse=True)
+    # Consensus is a property of the whole result set, not of one record, so
+    # it can only be computed once both providers have reported.
+    consensus = _series_author_consensus(accepted)
+    accepted.sort(
+        key=lambda x: (x[1], _record_quality(x[0]) + _consensus_bonus(x[0], consensus)),
+        reverse=True,
+    )
     accepted = accepted[: req.top_n]
 
     if not accepted and len(set(provider_errors)) == 2:
@@ -357,6 +380,155 @@ def _dedup_key_raw(title: str, author: str) -> str:
 def _dedup_key(book) -> str:
     """Create a dedup key from title + first author, normalised."""
     return _dedup_key_raw(book.title, book.authors[0] if book.authors else "")
+
+
+# Metadata a duplicate record may be able to supply. Readership is the reason
+# this list exists: edition_count, ratings_average, ratings_count,
+# want_to_read_count and already_read_count come only from Open Library, and
+# _record_quality depends on them to tell a novel from the books about it.
+# The rest are here because a gap is a gap — a Google Books page count or an
+# Open Library cover is worth keeping whichever record it arrived on.
+_MERGEABLE_META = (
+    "edition_count", "ratings_average", "ratings_count", "want_to_read_count",
+    "already_read_count", "publish_year", "publishedDate", "pageCount",
+    "infoLink", "thumbnail", "language",
+)
+
+
+# Ceiling on how many tags a merged record may carry. See _merge_duplicate
+# for why an unbounded union is a correctness problem, not just a tidy one.
+_MERGED_TAG_CAP = 20
+
+
+def _merge_duplicate(keep, dup) -> bool:
+    """Fold a cross-provider duplicate into the record we already accepted.
+
+    The two catalogues describe the same book with disjoint strengths: Google
+    Books carries a real blurb and page count, Open Library carries the
+    readership counts. Dropping whichever arrived second threw one of those
+    away — and because Google Books is fetched first, the half that was always
+    lost was the popularity half.
+
+    That silently disabled the tiebreak _record_quality was built around
+    ("readership separates the novel from its companions"). Measured on the
+    live index: searching "The Hobbit" returned a stage play first, because
+    Tolkien's own Open Library record — 481 editions, 3901 want-to-read — was
+    fetched, matched an existing key, and discarded. Same shape for Circe
+    (Madeline Miller was 6th), Dune and The Hunger Games.
+
+    Only fills gaps: a field the kept record already has is never overwritten,
+    so this can add evidence but never contradict what a provider actually
+    said. Returns True when anything changed, so the caller can re-score.
+    """
+    changed = False
+    meta = dict(keep.metadata or {})
+    dup_meta = dup.metadata or {}
+    for field in _MERGEABLE_META:
+        if not meta.get(field) and dup_meta.get(field):
+            meta[field] = dup_meta[field]
+            changed = True
+    if changed:
+        keep.metadata = meta
+    # The longer description is the more informative one, and /similar scores
+    # on description text — a two-line Open Library stub should not displace a
+    # real Google Books blurb, nor the reverse. Both sides are coerced first:
+    # Google Books returns `"description": null` for some volumes, and
+    # _from_google_item passes that through, so a None can reach here and a
+    # bare len() would 500 the whole search.
+    keep.description = keep.description or ""
+    if len(dup.description or "") > len(keep.description):
+        keep.description = dup.description
+        changed = True
+    # Tags are unioned rather than replaced. Providers disagree about what a
+    # book is shelved as, and the union is what gave Tolkien's record a
+    # `Fiction` atom alongside `Hobbits (Fictitious characters)`.
+    #
+    # Capped, because the union is otherwise unbounded: one dedup key can
+    # absorb many duplicates across Google Books' 120 records and Open
+    # Library's batches, adding up to 5 subjects each time. That matters
+    # beyond tidiness — SimilarRequest, SaveBookRequest and FeedbackRequest
+    # all cap `tags` at 50, and the frontend posts a search result straight
+    # back to those endpoints, so an over-tagged record would turn Find
+    # Similar, Save and thumbs-up into 422s on the most popular books. The cap
+    # sits far below that limit and past the point of any scoring benefit.
+    if dup.tags and len(keep.tags) < _MERGED_TAG_CAP:
+        have = {str(t).lower() for t in keep.tags}
+        room = _MERGED_TAG_CAP - len(keep.tags)
+        extra = [t for t in dup.tags if str(t).lower() not in have][:room]
+        if extra:
+            keep.tags = list(keep.tags) + extra
+            changed = True
+    return changed
+
+
+# How much credit a record gets for being by the author who owns its series.
+#
+# Measured across 9 ambiguous titles, with the cross-provider merge already in
+# place: 7/9 correct #1 at 0.0, 8/9 at 0.5, 9/9 at 1.0 and 9/9 at 2.0. Nothing
+# regressed at any value. 1.0 is the smallest that clears every case, and 2.0
+# scoring the same says this is a plateau rather than a knife-edge.
+SERIES_CONSENSUS_BONUS = 1.0
+
+
+def _series_author_consensus(entries) -> dict[str, str]:
+    """Series key -> the author surname owning the most records under it.
+
+    When many records share a title, the author who appears across most of
+    them is almost always the one who wrote it: catalogues carry every edition
+    and volume under the real author, while adaptations, study guides and
+    stage versions each appear once under their own. Searching "The Hobbit"
+    returns four Tolkien records against one Ruth Perry; "shadow slave" five
+    Guiltythree against two D. I. Telbat.
+
+    Grouped by _split_series rather than by exact title, and that distinction
+    is what makes it work: Guiltythree's records are titled "Shadow Slave" and
+    "Shadow Slave, Book 1/2/3", so exact-title grouping counts them as four
+    separate one-record groups and finds no consensus at all.
+
+    A strict plurality of at least two is required. One record is not a
+    consensus, and a tie is not evidence.
+
+    IMPORTANT — this rule is only safe *because* _merge_duplicate runs first,
+    and reverting that while keeping this would reintroduce a bug rather than
+    a neutral loss. An earlier version of this idea was measured without the
+    merge and elected summary mills: "Abookaday" and "Daily Books Staff"
+    publish more records titled "Gone Girl" than Gillian Flynn does, so the
+    plurality was theirs. What defeats them now is that Flynn's record carries
+    the Open Library readership the merge recovered (quality ~4.8), which this
+    bonus cannot overturn — while a genuinely uncatalogued author like
+    Guiltythree, where no record has readership, is decided by it.
+    """
+    groups: dict[str, Counter] = defaultdict(Counter)
+    for book, _score in entries:
+        series_key = _split_series(book.title)[0]
+        for author in book.authors or ():
+            if not author:
+                continue          # providers occasionally emit a null author
+            surname = _author_surname(author)
+            if len(surname) > 2:  # initials are not identities
+                groups[series_key][surname] += 1
+    consensus: dict[str, str] = {}
+    for series_key, counts in groups.items():
+        ranked = counts.most_common(2)
+        if not ranked:
+            continue
+        (top, n) = ranked[0]
+        runner_up = ranked[1][1] if len(ranked) > 1 else 0
+        if n >= 2 and n > runner_up:
+            consensus[series_key] = top
+    return consensus
+
+
+def _consensus_bonus(book, consensus: dict[str, str]) -> float:
+    """SERIES_CONSENSUS_BONUS when this record is by its series' owning author."""
+    if not consensus:
+        return 0.0
+    wanted = consensus.get(_split_series(book.title)[0])
+    if not wanted:
+        return 0.0
+    return (SERIES_CONSENSUS_BONUS
+            if any(_author_surname(a) == wanted for a in (book.authors or ()) if a)
+            else 0.0)
 
 
 def _record_quality(book) -> float:
