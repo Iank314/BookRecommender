@@ -373,8 +373,63 @@ def search(
     )
 
 
+def _author_initial(name: str) -> str:
+    """First given-name initial, from either "J. R. R. Tolkien" or the
+    catalogue form "Tolkien, J. R. R.".
+
+    The comma form puts the surname first, so the given names are whatever
+    follows the comma; otherwise they are everything before the last word.
+    Pairs with _author_surname to identify a person as initial + surname.
+    """
+    given = name.split(",", 1)[1] if "," in name else " ".join(name.split()[:-1])
+    for ch in given:
+        if ch.isalpha():
+            return ch.lower()
+    return ""
+
+
 def _dedup_key_raw(title: str, author: str) -> str:
-    return f"{title.lower().strip()}||{author.lower().strip()}"
+    """Identity key for a book: title + author as initial-and-surname.
+
+    The author half is normalised rather than compared raw because catalogues
+    spell one person several ways and every spelling used to become its own
+    record. Measured on the live index: "The Hobbit" spent its top three slots
+    on "J.R.R. Tolkien", "John Ronald Reuel Tolkien" and "J. R. R. Tolkien" --
+    one book, three slots, pushing two real books off page one. Folding them
+    promotes William Howard Green and Joseph Mathewson into the top eight,
+    and `total` is unchanged, so the freed slots backfill rather than vanish.
+
+    Initial *and* surname, not surname alone. Surname alone was measured on
+    the same pools and folds "Frank Herbert" into "Brian Herbert" on a "dune"
+    search -- a father and son who both wrote Dune books -- and "Daily Books
+    Staff" into "Top 50 Facts Staff" on "gone girl". The initial separates
+    those while still folding every Tolkien form. Across nine cached search
+    pools it made 103 folds with no false merge; the only pairs it joins
+    beyond initial-expansion are variant spellings of one person ("Adam
+    Roberts" / "ARRR Roberts", accented names spelled both ways).
+
+    Deliberately *not* also normalising the title: that is a separate
+    hypothesis, and varying both at once would have made either result
+    unattributable.
+
+    The same key excludes the source book from /similar and library books
+    from recommendations, so the tolerance carries there too -- asking for
+    books like "The Hobbit by J.R.R. Tolkien" no longer recommends "The
+    Hobbit by John Ronald Reuel Tolkien" straight back.
+
+    It also decides _series_author_consensus, which counts one vote per
+    accepted record. Before this, an author filed under three spellings cast
+    three votes: on "circe" that elected "gelli" over Madeline Miller and its
+    bonus put a 16th-century Italian text at #1. Collapsing the spellings
+    leaves one vote, no plurality, and the novel first. "The Hobbit" still
+    elects "tolkien", so the case that rule was built for is unaffected.
+    """
+    # Providers occasionally emit a null in the author list, which reached
+    # here as None and raised on .lower(); the guard is free at this call site.
+    author = (author or "").strip()
+    if not author:
+        return f"{title.lower().strip()}||"
+    return f"{title.lower().strip()}||{_author_initial(author)} {_author_surname(author)}"
 
 
 def _dedup_key(book) -> str:
@@ -497,6 +552,10 @@ def _series_author_consensus(entries) -> dict[str, str]:
     the Open Library readership the merge recovered (quality ~4.8), which this
     bonus cannot overturn — while a genuinely uncatalogued author like
     Guiltythree, where no record has readership, is decided by it.
+
+    It leans on _dedup_key for the same reason: one vote per record only means
+    one vote per author once the key has folded that author's spellings
+    together. See _dedup_key_raw for the "circe" measurement.
     """
     groups: dict[str, Counter] = defaultdict(Counter)
     for book, _score in entries:

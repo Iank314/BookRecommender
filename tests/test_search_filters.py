@@ -160,7 +160,8 @@ def test_quality_never_overrides_relevance():
 # (Madeline Miller ranked 6th), Dune and The Hunger Games.
 
 from server.app import (  # noqa: E402
-    _book_popularity, _dedup_key, _genre_atoms, _merge_duplicate, _real_genres,
+    _book_popularity, _dedup_key, _dedup_key_raw, _genre_atoms, _merge_duplicate,
+    _real_genres,
 )
 
 
@@ -182,6 +183,76 @@ def _ol(title="The Hobbit", authors=("J.R.R. Tolkien",),
 def test_the_two_providers_collide_on_the_same_dedup_key():
     """The premise: casing differences do not save the duplicate."""
     assert _dedup_key(_gb(authors=["J.r.r. Tolkien"])) == _dedup_key(_ol())
+
+
+# ---- author-variant dedup ----------------------------------------------------
+# Regression: the key compared the author string raw, so one person spelled
+# several ways became several records. Measured on the live index once the
+# cross-provider merge had shipped: "The Hobbit" spent its top three slots on
+# "J.R.R. Tolkien", "John Ronald Reuel Tolkien" and "J. R. R. Tolkien" -- one
+# book, three slots, two real books pushed off page one.
+#
+# The negative tests below are why the key carries the given-name initial and
+# not the surname alone. Surname-only was measured on the same cached pools
+# and folded a father into his son, and one summary mill into another.
+
+
+def test_every_spelling_of_one_author_shares_a_key():
+    """The motivating case: three spellings of Tolkien, three top slots."""
+    assert len({_dedup_key_raw("The Hobbit", a) for a in (
+        "J.R.R. Tolkien", "J. R. R. Tolkien", "J.r.r. Tolkien",
+        "John Ronald Reuel Tolkien")}) == 1
+
+
+def test_the_catalogue_form_is_the_same_person():
+    """Open Library files "Tolkien, J. R. R."; Google Books says the reverse."""
+    assert (_dedup_key_raw("The Hobbit", "Tolkien, J. R. R.")
+            == _dedup_key_raw("The Hobbit", "J. R. R. Tolkien"))
+
+
+def test_an_abbreviated_given_name_matches_its_expansion():
+    assert (_dedup_key_raw("Dune", "B. Herbert")
+            == _dedup_key_raw("Dune", "Brian Herbert"))
+
+
+def test_a_father_and_son_are_not_the_same_author():
+    """Frank and Brian Herbert both wrote Dune books. Surname-only dedup folded
+    them together and dropped one of them from a "dune" search."""
+    assert (_dedup_key_raw("Dune", "Frank Herbert")
+            != _dedup_key_raw("Dune", "Brian Herbert"))
+
+
+def test_two_summary_mills_are_not_merged():
+    """Both end in "Staff", which surname-only dedup read as one author."""
+    assert (_dedup_key_raw("Gone Girl", "Daily Books Staff")
+            != _dedup_key_raw("Gone Girl", "Top 50 Facts Staff"))
+
+
+def test_a_one_word_author_keys_on_itself():
+    """Web-serial authors publish under a single name, so there is no initial
+    to take -- the key must still be stable, and still not look authorless."""
+    assert (_dedup_key_raw("Shadow Slave", "Guiltythree")
+            == _dedup_key_raw("Shadow Slave", "guiltythree"))
+    assert (_dedup_key_raw("Shadow Slave", "Guiltythree")
+            != _dedup_key_raw("Shadow Slave", ""))
+
+
+def test_authorless_records_still_share_one_key():
+    assert (_dedup_key_raw("The Hunger Games", "")
+            == _dedup_key_raw("The Hunger Games", "   "))
+
+
+def test_a_null_author_does_not_crash_the_key():
+    """Providers occasionally emit a null in the author list, which reached
+    _dedup_key as None and raised on .lower()."""
+    null_author = Books(id="n", title="Ghost", authors=[None], description="",
+                        tags=[], metadata={})
+    assert _dedup_key(null_author) == _dedup_key_raw("Ghost", "")
+
+
+def test_different_titles_never_share_a_key():
+    assert (_dedup_key_raw("Dune", "Frank Herbert")
+            != _dedup_key_raw("Dune Messiah", "Frank Herbert"))
 
 
 def test_merging_recovers_the_popularity_the_dedup_used_to_discard():
@@ -357,3 +428,24 @@ def test_catalogue_and_plain_author_forms_are_the_same_person():
     Counting them separately would split the plurality they should form."""
     entries = [_e("T", "Rowling, J. K."), _e("T", "J. K. Rowling"), _e("T", "Someone Else")]
     assert _series_author_consensus(entries) == {"t": "rowling"}
+
+
+def test_spelling_variants_cast_one_vote_not_three():
+    """Consensus counts one vote per accepted record, so it depends on the
+    dedup key having already folded an author's spellings together.
+
+    Measured on a cached "circe" pool: Gelli is filed under three spellings,
+    each of which was its own record and so its own vote, out-voting Madeline
+    Miller's single record. Consensus elected "gelli" and its +1.0 put a
+    16th-century Italian text at #1 ahead of the novel. Deduping the variants
+    first drops Gelli to one vote, and with no plurality Miller takes #1.
+    """
+    variants = ["Giovan Battista Gelli", "Giovanni Battista Gelli",
+                "Giovanni Battista 1498-1563 Gelli"]
+    assert len({_dedup_key_raw("Circe", a) for a in variants}) == 1
+
+    ballot_stuffed = [_e("Circe", a) for a in variants] + [_e("Circe", "Madeline Miller")]
+    assert _series_author_consensus(ballot_stuffed) == {"circe": "gelli"}
+
+    deduped = [_e("Circe", variants[0]), _e("Circe", "Madeline Miller")]
+    assert _series_author_consensus(deduped) == {}

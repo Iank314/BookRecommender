@@ -44,7 +44,12 @@ from typing import Any, Callable, Iterable
 #     blurbs zeroed instead of scored (_is_synthesized_blurb), a record-quality
 #     tie-break in /search (_record_quality), and title-script language
 #     detection (_title_looks_non_english).
-CACHE_VERSION = 10
+# v11: the dedup key identifies an author by initial + surname instead of by
+#     raw string, so a catalogue's spelling variants ("J.R.R. Tolkien" vs
+#     "John Ronald Reuel Tolkien") collapse into one record. That changes
+#     /similar's candidate pool and its source-book exclusion, and which
+#     library books are filtered out of /library/recommend.
+CACHE_VERSION = 11
 
 
 class RecommendationCache:
