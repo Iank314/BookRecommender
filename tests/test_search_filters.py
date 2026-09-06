@@ -145,3 +145,183 @@ def test_quality_never_overrides_relevance():
                     key=lambda b: (_score_book(b, q, "general"), _record_quality(b)),
                     reverse=True)
     assert ranked[0] is NOVEL
+
+
+# ---- cross-provider duplicate merging ----------------------------------------
+# Regression: the two catalogues describe the same book with disjoint
+# strengths -- Google Books has the blurb, Open Library has the readership --
+# and the dedup dropped whichever arrived second. Google Books is fetched
+# first, so the half always lost was the popularity half, which is the very
+# signal _record_quality uses to tell a novel from the books about it.
+#
+# Measured live before the fix: "The Hobbit" returned a stage play first,
+# because Tolkien's Open Library record (481 editions, 3901 want-to-read) was
+# fetched, collided on `title||author`, and was discarded. Same for Circe
+# (Madeline Miller ranked 6th), Dune and The Hunger Games.
+
+from server.app import (  # noqa: E402
+    _book_popularity, _dedup_key, _genre_atoms, _merge_duplicate, _real_genres,
+)
+
+
+def _gb(title="The Hobbit", authors=("J.R.R. Tolkien",), tags=("Fiction",),
+        desc="A hobbit leaves home.") -> Books:
+    return Books(id="gb_1", title=title, authors=list(authors), description=desc,
+                 tags=list(tags), metadata={"pageCount": 300, "language": "en",
+                                            "source": "google_books"})
+
+
+def _ol(title="The Hobbit", authors=("J.R.R. Tolkien",),
+        tags=("Fantasy fiction",), desc="") -> Books:
+    return Books(id="ol_/works/OL1W", title=title, authors=list(authors),
+                 description=desc, tags=list(tags),
+                 metadata={"edition_count": 481, "want_to_read_count": 3901,
+                           "ratings_count": 100, "source": "open_library"})
+
+
+def test_the_two_providers_collide_on_the_same_dedup_key():
+    """The premise: casing differences do not save the duplicate."""
+    assert _dedup_key(_gb(authors=["J.r.r. Tolkien"])) == _dedup_key(_ol())
+
+
+def test_merging_recovers_the_popularity_the_dedup_used_to_discard():
+    keep = _gb()
+    assert _book_popularity(keep) == 0.0        # GB carries no readership
+    assert _merge_duplicate(keep, _ol()) is True
+    assert keep.metadata["edition_count"] == 481
+    assert keep.metadata["want_to_read_count"] == 3901
+    assert _book_popularity(keep) > 0.8
+
+
+def test_merging_recovers_a_real_genre_from_the_other_catalogue():
+    keep = _gb(tags=["Fiction"])                # generic only -> no genre credit
+    assert not _real_genres(set(_genre_atoms(keep.tags)[0]))
+    _merge_duplicate(keep, _ol(tags=["Fantasy fiction"]))
+    assert _real_genres(set(_genre_atoms(keep.tags)[0])) == {"fantasy"}
+
+
+def test_merging_never_overwrites_what_a_provider_actually_said():
+    keep = _gb(desc="A long and genuine publisher blurb about the novel.")
+    keep.metadata["edition_count"] = 7          # already known -- must survive
+    _merge_duplicate(keep, _ol(desc="stub"))
+    assert keep.metadata["edition_count"] == 7
+    assert keep.description.startswith("A long and genuine")
+
+
+def test_a_longer_description_from_either_side_wins():
+    keep = _gb(desc="short")
+    _merge_duplicate(keep, _ol(desc="a considerably longer real description"))
+    assert keep.description == "a considerably longer real description"
+
+
+def test_merging_lets_the_novel_beat_an_adaptation_that_shares_its_title():
+    """The end-to-end shape of the live bug, on _record_quality alone."""
+    play = Books(id="gb_2", title="The Hobbit", authors=["Ruth Perry"],
+                 description="A dramatisation in two acts for young players.",
+                 tags=["Drama"], metadata={"source": "google_books"})
+    novel = _gb()
+    assert _record_quality(play) > _record_quality(novel)   # the bug
+    _merge_duplicate(novel, _ol())
+    assert _record_quality(novel) > _record_quality(play)   # the fix
+
+
+# ---- merge safety ------------------------------------------------------------
+# Three ways the merge could hurt production, found by fuzzing it directly.
+
+from server.app import _MERGED_TAG_CAP, SimilarRequest  # noqa: E402
+
+
+def test_a_null_description_from_google_books_does_not_crash_the_search():
+    """Google Books returns `"description": null` for some volumes and
+    _from_google_item passes it straight through, so a bare len() here would
+    500 the entire search rather than skip one record."""
+    keep = _gb(desc=None)
+    assert _merge_duplicate(keep, _ol(desc="a real blurb")) is True
+    assert keep.description == "a real blurb"
+    assert _merge_duplicate(_gb(), _ol(desc=None)) in (True, False)  # must not raise
+
+
+def test_a_non_string_tag_does_not_crash_the_search():
+    # Open Library subjects are community-edited and reach _from_openlib_doc
+    # without coercion, so a non-string can arrive here.
+    assert _merge_duplicate(_gb(tags=[7]), _ol(tags=["Fiction"])) in (True, False)
+    assert _merge_duplicate(_gb(), _ol(tags=[123, None])) in (True, False)
+
+
+def test_tag_union_is_bounded():
+    """Unbounded, this breaks three endpoints rather than merely bloating.
+
+    One dedup key can absorb many duplicates across Google Books' 120 records
+    and Open Library's batches. SimilarRequest, SaveBookRequest and
+    FeedbackRequest all cap `tags` at 50, and the frontend posts a search
+    result straight back to them -- so an over-tagged record would 422 Find
+    Similar, Save and thumbs-up on exactly the most popular books.
+    """
+    keep = _gb(tags=["Fiction"])
+    for i in range(500):
+        _merge_duplicate(keep, _ol(tags=[f"Subject {i}", f"Other {i}"]))
+    assert len(keep.tags) <= _MERGED_TAG_CAP
+    assert _MERGED_TAG_CAP < 50
+    SimilarRequest(title="T", tags=keep.tags)  # must validate, not raise
+
+
+def test_merging_is_idempotent():
+    """Re-merging the same duplicate must be a no-op, or repeated passes drift."""
+    keep, dup = _gb(desc="short"), _ol(desc="a longer real description")
+    assert _merge_duplicate(keep, dup) is True
+    snapshot = (list(keep.tags), keep.description, dict(keep.metadata))
+    assert _merge_duplicate(keep, dup) is False
+    assert (list(keep.tags), keep.description, dict(keep.metadata)) == snapshot
+
+
+# ---- the edition-count floor -------------------------------------------------
+# edition_count differs from the other three popularity fields: its floor is
+# ONE (a catalogued work has an edition by definition), not zero. Measured over
+# 108 pooled Open Library records: edition_count was never 0 and was exactly 1
+# for 80% of them, while ratings_count was zero for 95%. Shifting it by +1 like
+# the others therefore paid a flat 0.100 to four out of five records for merely
+# existing -- and since _book_popularity takes the max and most records have no
+# ratings, that bonus was often the only signal a record had.
+
+from server.app import _book_popularity, _popularity_signals  # noqa: E402
+
+
+def _pop(**meta) -> float:
+    return _book_popularity(Books(id="p", title="T", authors=[], description="",
+                                  tags=[], metadata=meta))
+
+
+def test_a_single_edition_is_not_evidence_of_readership():
+    assert _pop(edition_count=1) == 0.0
+    assert _pop(edition_count=0) == 0.0
+
+
+def test_more_editions_still_score_and_stay_ordered():
+    assert _pop(edition_count=2) > 0.0
+    assert _pop(edition_count=500) > _pop(edition_count=50) > _pop(edition_count=2)
+
+
+def test_large_edition_counts_are_essentially_unchanged():
+    """The fix must only touch the low end, or it silently reranks everything."""
+    editions, *_ = _popularity_signals({"edition_count": 481})
+    assert round(editions, 3) == 0.894
+
+
+def test_the_other_signals_keep_their_shift_because_zero_is_their_real_floor():
+    # One rating IS evidence -- unlike one edition, zero ratings is the common
+    # case, so a single rating means someone actually engaged.
+    assert _pop(ratings_count=1) > 0.0
+    assert _pop(want_to_read_count=1) > 0.0
+    assert _pop(already_read_count=1) > 0.0
+
+
+def test_a_lone_edition_no_longer_breaks_a_genuine_tie():
+    """The live 'shadow slave' case: two equally unknown Google Books records,
+    one of which merged a single Open Library edition and won on that alone."""
+    plain = Books(id="a", title="Shadow Slave", authors=["Guiltythree"],
+                  description="A long real blurb about the Nightmare Spell.",
+                  tags=["Fiction"], metadata={})
+    with_one_edition = Books(id="b", title="SHADOW SLAVE", authors=["D. I. Telbat"],
+                             description="A Christian suspense novel.",
+                             tags=[], metadata={"edition_count": 1})
+    assert _record_quality(plain) == _record_quality(with_one_edition)
