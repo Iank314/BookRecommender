@@ -89,7 +89,8 @@ A full-stack book recommendation system that searches **Google Books** and **Ope
 ### Accounts & Personal Library
 - Register / log in with a username and password (passwords stored salted + PBKDF2-hashed)
 - Each account has its own library, persisted in SQLite and tied to a login session — it survives restarts, cleared cookies, and works across devices
-- Search and "Find Similar" are open to everyone; saving, recording feedback, and library recommendations require logging in
+- Search and "Find Similar" are open to everyone; saving, recording feedback, and library recommendations require a session — either a real account or a guest one
+- **Guest mode**: "try it without an account" hands out a credential-less throwaway account, so every library feature works before signing up. A guest is a real `users` row (`is_guest = 1`) with a password hash nothing can match, so there is one code path rather than an anonymous twin of every endpoint. A persistent banner and a one-time explainer say that nothing is saved to an account; **signing up promotes the guest in place**, keeping its `user_id`, so the books, sections and feedback collected as a guest carry over with no copying. Guest creation is capped per client (10 / 10min) since it is the one unauthenticated endpoint that writes a permanent row, and guests expire after 30 days — `python -m scripts.prune_guests` deletes them with their data
 - Save and remove books (genres, description, and language are captured on save); view your collection in a dedicated tab
 - Three views in the library tab — **Saved** (your collection), **Liked** (thumbs-up signals), **Disliked** (thumbs-down signals) — each independently manageable
 - **Sections**: organize saved books into named shelves ("Sci-fi favorites", "Cozy reads") — a book can live in any number of sections, and removing it from the library removes it from its sections too
@@ -172,7 +173,7 @@ BookRecommender/
 │   ├── storage/
 │   │   ├── feedback_db.py  SQLite per-user thumbs-up / thumbs-down store
 │   │   ├── library_db.py   SQLite per-user saved-library store
-│   │   └── users_db.py     SQLite accounts + login sessions (PBKDF2 hashing)
+│   │   └── users_db.py     SQLite accounts + login sessions (PBKDF2 hashing), guest accounts
 │   ├── cache/
 │   │   └── rec_cache.py    In-process LRU cache for library recommendations
 │   └── fetcher/
@@ -180,9 +181,10 @@ BookRecommender/
 ├── data/
 │   └── library.db          SQLite database (accounts, sessions, libraries) — created on first run
 ├── scripts/
-│   └── explain_similar.py  Tuning tool: score breakdown for "Find Similar"
-├── tests/                  24 modules — scoring, candidate filters, stores,
-│                           caches, auth, SEO pages, referrers, routes
+│   ├── explain_similar.py  Tuning tool: score breakdown for "Find Similar"
+│   └── prune_guests.py     Delete expired guest accounts and their data (cron)
+├── tests/                  25 modules — scoring, candidate filters, stores,
+│                           caches, auth, guest mode, SEO pages, referrers, routes
 ├── requirements.txt
 └── README.md
 ```
@@ -196,10 +198,11 @@ BookRecommender/
 | `GET` | `/` | — | Serve frontend |
 | `POST` | `/search` | — | Search books by title, author, or genre |
 | `POST` | `/similar` | — | Find books similar to a given book |
-| `POST` | `/auth/register` | — | Create an account, start a login session |
+| `POST` | `/auth/register` | — | Create an account, start a login session. Called from a guest session, it promotes that guest instead, keeping its library |
 | `POST` | `/auth/login` | — | Log in, start a login session |
 | `POST` | `/auth/logout` | — | End the current session |
-| `GET` | `/auth/me` | session | Return the logged-in username |
+| `POST` | `/auth/guest` | — | Start a guest session (throwaway account, no credentials). Idempotent: returns the existing session if one is already set |
+| `GET` | `/auth/me` | session | Return the current username, plus `is_admin` / `is_guest` |
 | `GET` | `/library` | session | List the account's saved books |
 | `POST` | `/library/add` | session | Save a book to the account's library |
 | `DELETE` | `/library/{book_id}` | session | Remove a book from the library |
