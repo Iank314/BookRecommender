@@ -588,7 +588,8 @@ main {
   background: #23252f;
 }
 
-#auth-modal {
+#auth-modal,
+#guest-modal {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.6);
@@ -704,6 +705,142 @@ main {
   display: block;
   max-width: 260px;
   margin: 0 auto;
+}
+
+/* ---- Guest mode ---- */
+
+/* The standing banner. Amber rather than red: this is a condition to be aware
+   of, not an error — and it is on screen for the whole session, so an alarm
+   colour would wear out its welcome within a minute. Full-bleed above the
+   header so it can't be mistaken for part of the page content. */
+#guest-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem 1rem;
+  padding: 0.7rem 1.5rem;
+  background: #2e2411;
+  border-bottom: 1px solid #5c4a1f;
+  color: #e8c97a;
+  font-size: 0.87rem;
+  line-height: 1.45;
+  text-align: center;
+}
+
+.guest-banner-text strong {
+  color: #f5d98a;
+}
+
+#guest-upgrade-btn {
+  flex-shrink: 0;
+  padding: 0.4rem 0.9rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  border: 1px solid #7a6329;
+  border-radius: 6px;
+  background: #3d3116;
+  color: #f5d98a;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+#guest-upgrade-btn:hover {
+  background: #4d3e1c;
+}
+
+/* "Or try it without an account", under the log in / sign up toggle. */
+.auth-guest {
+  margin-top: 0.5rem;
+  text-align: center;
+}
+
+.auth-guest button {
+  background: none;
+  border: none;
+  color: #8b8d97;
+  font-size: 0.82rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.auth-guest button:hover {
+  color: #e1e2e6;
+}
+
+.auth-guest button:disabled {
+  color: #5a5d6b;
+  cursor: not-allowed;
+}
+
+/* Shown in the login form when a guest is about to log in to a *different*
+   account and leave their guest library behind. Same amber as the banner —
+   it's the same class of warning, not an error. */
+.auth-warning {
+  margin-bottom: 0.8rem;
+  padding: 0.6rem 0.8rem;
+  background: #2e2411;
+  border: 1px solid #5c4a1f;
+  border-radius: 6px;
+  color: #e8c97a;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+#guest-modal .auth-card {
+  max-width: 440px;
+}
+
+.guest-modal-lead {
+  color: #8b8d97;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  margin-bottom: 0.9rem;
+}
+
+.guest-modal-list {
+  margin: 0 0 1.3rem 1.1rem;
+  padding: 0;
+  color: #b6b8c2;
+  font-size: 0.87rem;
+  line-height: 1.6;
+}
+
+.guest-modal-list li {
+  margin-bottom: 0.35rem;
+}
+
+.guest-modal-list strong {
+  color: #e1e2e6;
+}
+
+#guest-modal-ok {
+  display: block;
+  width: 100%;
+  max-width: none;
+}
+
+/* The guest door on the logged-out library panel, under "Log in or sign up". */
+.guest-try-btn {
+  display: block;
+  margin: 0.9rem auto 0;
+  background: none;
+  border: none;
+  color: #8b8d97;
+  font-size: 0.87rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.guest-try-btn:hover {
+  color: #e1e2e6;
+}
+
+.guest-try-note {
+  max-width: 420px;
+  margin: 0.7rem auto 0;
+  font-size: 0.82rem;
+  text-align: center;
 }
 
 /* ---- Utility ---- */
@@ -1412,3 +1549,38 @@ body.light .auth-close:hover { color: #24262e; }
 .auth-forgot a:hover {
   text-decoration: underline;
 }
+
+/* ---- Guest mode, light theme ---- */
+/* The dark amber palette is unreadable on white, so the banner and the login
+   warning get a light-amber surface with a dark-amber foreground rather than
+   inheriting. Same pairing for both: they're one warning shown in two places,
+   and having them disagree on colour would imply they mean different things. */
+body.light #guest-banner,
+body.light .auth-warning {
+  background: #fdf5e0;
+  border-color: #e0cb94;
+  color: #6b551d;
+}
+
+body.light .guest-banner-text strong { color: #4d3d12; }
+
+body.light #guest-upgrade-btn {
+  background: #ffffff;
+  border-color: #d8c187;
+  color: #6b551d;
+}
+
+body.light #guest-upgrade-btn:hover { background: #f6ecd4; }
+
+body.light .auth-guest button,
+body.light .guest-try-btn,
+body.light .guest-modal-lead,
+body.light .guest-try-note { color: #5a5d6b; }
+
+body.light .auth-guest button:hover,
+body.light .guest-try-btn:hover { color: #24262e; }
+
+body.light .auth-guest button:disabled { color: #a0a3b0; }
+
+body.light .guest-modal-list { color: #45485a; }
+body.light .guest-modal-list strong { color: #24262e; }

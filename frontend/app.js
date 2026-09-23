@@ -31,6 +31,16 @@ const authError     = document.getElementById("auth-error");
 const authSubmit    = document.getElementById("auth-submit");
 const authToggleText = document.getElementById("auth-toggle-text");
 const authToggleBtn  = document.getElementById("auth-toggle-btn");
+const authGuestBtn   = document.getElementById("auth-guest-btn");
+const guestLoginWarning = document.getElementById("guest-login-warning");
+
+// Guest-mode elements
+const guestBanner     = document.getElementById("guest-banner");
+const guestUpgradeBtn = document.getElementById("guest-upgrade-btn");
+const guestModal      = document.getElementById("guest-modal");
+const guestModalClose = document.getElementById("guest-modal-close");
+const guestModalOk    = document.getElementById("guest-modal-ok");
+const guestModalSignup = document.getElementById("guest-modal-signup");
 
 // Help / user manual elements
 const helpModal = document.getElementById("help-modal");
@@ -46,7 +56,14 @@ let viewMode = "search"; // "search" | "library"
 let libraryView = "saved"; // "saved" | "liked" | "disliked"
 let currentUser = null;  // username string when logged in, else null
 let currentIsAdmin = false;
+let currentIsGuest = false;  // true while the session is a throwaway guest
 let authMode = "login";  // "login" | "register"
+
+// The one-time guest explainer is remembered per browser, not per session:
+// a guest who reloads has already read it, and re-showing it on every visit
+// would train people to dismiss it without reading. The standing banner is
+// what keeps the warning present after that.
+const GUEST_SEEN_KEY = "bookrec.guestIntroSeen";
 
 // Sections state (saved view only). `sections` mirrors GET /library/sections,
 // `activeSectionId` filters the saved view (null = all books), and
@@ -187,13 +204,16 @@ async function checkAuth() {
       const data = await res.json();
       currentUser = data.username;
       currentIsAdmin = !!data.is_admin;
+      currentIsGuest = !!data.is_guest;
     } else {
       currentUser = null;
       currentIsAdmin = false;
+      currentIsGuest = false;
     }
   } catch {
     currentUser = null;
     currentIsAdmin = false;
+    currentIsGuest = false;
   }
   renderAuthBar();
   // Returning logged-in users land on their library, not an empty search box.
@@ -205,7 +225,15 @@ async function checkAuth() {
 }
 
 function renderAuthBar() {
-  if (currentUser) {
+  if (currentIsGuest) {
+    // Never "Signed in as guest-1a2b" — that reads like an account, which is
+    // the one impression guest mode must not leave. "Log out" is still the
+    // right label: it ends the session, and for a guest that discards
+    // everything, which is what the confirm prompt spells out.
+    authStatus.textContent = "Browsing as a guest";
+    authLoginBtn.classList.remove("hidden");
+    authLogoutBtn.classList.remove("hidden");
+  } else if (currentUser) {
     authStatus.textContent = `Signed in as ${currentUser}`;
     authLoginBtn.classList.add("hidden");
     authLogoutBtn.classList.remove("hidden");
@@ -214,6 +242,8 @@ function renderAuthBar() {
     authLoginBtn.classList.remove("hidden");
     authLogoutBtn.classList.add("hidden");
   }
+  authLoginBtn.textContent = currentIsGuest ? "Sign up" : "Log in";
+  guestBanner.classList.toggle("hidden", !currentIsGuest);
   adminStatsBtn.classList.toggle("hidden", !(currentUser && currentIsAdmin));
 }
 
@@ -232,14 +262,84 @@ function closeAuth() {
 
 function updateAuthModal() {
   const isLogin = authMode === "login";
-  authTitle.textContent = isLogin ? "Log in" : "Sign up";
-  authSubmit.textContent = isLogin ? "Log in" : "Create account";
+  authTitle.textContent = isLogin
+    ? "Log in"
+    : currentIsGuest ? "Save your library" : "Sign up";
+  authSubmit.textContent = isLogin
+    ? "Log in"
+    : currentIsGuest ? "Create account and keep my books" : "Create account";
   authToggleText.textContent = isLogin ? "Don't have an account?" : "Already have an account?";
   authToggleBtn.textContent = isLogin ? "Sign up" : "Log in";
   authPassword.autocomplete = isLogin ? "current-password" : "new-password";
+  // Offering "try it without an account" to somebody who is already a guest
+  // would do nothing (the endpoint returns the session they have) and read as
+  // a broken button.
+  authGuestBtn.parentElement.classList.toggle("hidden", currentIsGuest);
+  // A guest logging in to a different account abandons the guest library. Say
+  // so here rather than after the fact.
+  guestLoginWarning.classList.toggle("hidden", !(currentIsGuest && isLogin));
 }
 
-authLoginBtn.addEventListener("click", () => openAuth("login"));
+// ---- Guest mode ----
+
+// Start (or resume) a guest session. The server is idempotent here: if a
+// session cookie is already present it hands back that account rather than
+// minting a second guest, so a stray double-click can't strand a library.
+async function startGuest() {
+  authGuestBtn.disabled = true;
+  try {
+    const res = await fetch(`${API}/auth/guest`, { method: "POST" });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(friendlyError(data?.detail));
+    currentUser = data.username;
+    currentIsAdmin = !!data.is_admin;
+    currentIsGuest = !!data.is_guest;
+    renderAuthBar();
+    closeAuth();
+    // Don't jump to the library: a brand-new guest's is empty, and landing on
+    // an empty shelf is a worse first impression than the search box.
+    startedAtLibrary = true;
+    if (activeCategory === "library") loadLibrary();
+    showGuestIntroOnce();
+  } catch (err) {
+    authError.textContent = err.message;
+    authError.classList.remove("hidden");
+  } finally {
+    authGuestBtn.disabled = false;
+  }
+}
+
+// The explainer, but only the first time on this browser. A failed read of
+// localStorage (private mode, blocked site data) falls through to showing it —
+// erring toward telling somebody their data isn't saved.
+function showGuestIntroOnce() {
+  let seen = false;
+  try { seen = localStorage.getItem(GUEST_SEEN_KEY) === "1"; } catch {}
+  if (seen) return;
+  guestModal.classList.remove("hidden");
+}
+
+function closeGuestModal() {
+  guestModal.classList.add("hidden");
+  try { localStorage.setItem(GUEST_SEEN_KEY, "1"); } catch {}
+}
+
+authGuestBtn.addEventListener("click", startGuest);
+guestModalOk.addEventListener("click", closeGuestModal);
+guestModalClose.addEventListener("click", closeGuestModal);
+guestModal.addEventListener("click", (e) => {
+  if (e.target === guestModal) closeGuestModal();
+});
+// "Let me sign up first" — mark the intro read, then straight into the signup
+// form. The guest session stays; registering from it promotes that same
+// account, so nothing saved in the meantime is lost either way.
+guestModalSignup.addEventListener("click", () => {
+  closeGuestModal();
+  openAuth("register");
+});
+guestUpgradeBtn.addEventListener("click", () => openAuth("register"));
+
+authLoginBtn.addEventListener("click", () => openAuth(currentIsGuest ? "register" : "login"));
 authClose.addEventListener("click", closeAuth);
 authModal.addEventListener("click", (e) => {
   if (e.target === authModal) closeAuth();
@@ -276,9 +376,17 @@ authForm.addEventListener("submit", async (e) => {
     if (!res.ok) throw new Error(friendlyError(data?.detail));
     currentUser = data.username;
     currentIsAdmin = !!data.is_admin;
+    // Both paths end guest mode: registering promotes the guest row into this
+    // account (same user_id, so the library came along), and logging in moves
+    // to a different one. Either way the banner should go.
+    const wasGuest = currentIsGuest;
+    currentIsGuest = false;
     renderAuthBar();
     closeAuth();
     startedAtLibrary = true;
+    // A promoted guest is the one "new account" that already has books in it,
+    // so send them to the library to see that they survived.
+    if (wasGuest && authMode === "register") { goToLibrary(); return; }
     // Logging in drops you straight into your library. A brand-new account has
     // nothing to show yet, so a sign-up stays on the search view unless the
     // library tab was already the one open.
@@ -292,9 +400,17 @@ authForm.addEventListener("submit", async (e) => {
 });
 
 authLogoutBtn.addEventListener("click", async () => {
+  // For a signed-in user logging out is reversible — log back in. For a guest
+  // it is not: there's no password, so dropping the cookie orphans the library
+  // until the pruner collects it. Worth one confirm.
+  if (currentIsGuest && !confirm(
+    "Leaving guest mode discards your guest library — there's no password to "
+    + "get back in. Sign up instead to keep your books. Leave anyway?"
+  )) return;
   try { await fetch(`${API}/auth/logout`, { method: "POST" }); } catch {}
   currentUser = null;
   currentIsAdmin = false;
+  currentIsGuest = false;
   renderAuthBar();
   if (activeCategory === "library") loadLibrary();
 });
@@ -530,7 +646,16 @@ async function loadLibrary() {
       fetch(url),
       libraryView === "saved" ? fetch(`${API}/library/sections`) : Promise.resolve(null),
     ]);
-    if (res.status === 401) { currentUser = null; renderAuthBar(); renderLoginPrompt(); return; }
+    // 401 here also covers a guest whose account the pruner has collected:
+    // the cookie is still in the browser but names nothing. Clearing the guest
+    // flag is what turns the stale banner back into the login prompt.
+    if (res.status === 401) {
+      currentUser = null;
+      currentIsGuest = false;
+      renderAuthBar();
+      renderLoginPrompt();
+      return;
+    }
     if (!res.ok) throw new Error("Failed to load library");
     const books = await res.json();
     if (secRes && secRes.ok) sections = await secRes.json();
@@ -558,6 +683,22 @@ function renderLoginPrompt() {
   loginBtn.textContent = "Log in or sign up";
   loginBtn.addEventListener("click", () => openAuth("login"));
   container.appendChild(loginBtn);
+
+  // The second door. This panel is where somebody meets the wall, so the
+  // alternative belongs here and not only inside the login modal — and it
+  // states the catch in the same breath as the offer.
+  const guestBtn = document.createElement("button");
+  guestBtn.className = "guest-try-btn";
+  guestBtn.textContent = "Or try it without an account";
+  guestBtn.addEventListener("click", startGuest);
+  container.appendChild(guestBtn);
+
+  const guestNote = document.createElement("p");
+  guestNote.className = "library-hint guest-try-note";
+  guestNote.textContent =
+    "Guest libraries stay on this browser for 30 days and aren't saved to an "
+    + "account. You can sign up later and keep everything.";
+  container.appendChild(guestNote);
 
   results.classList.remove("hidden");
 }

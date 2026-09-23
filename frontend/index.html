@@ -6,9 +6,24 @@
   <title>Book Recommender</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📚</text></svg>" />
   <!-- ?v= busts browser caches on deploy — bump it whenever app.js/style.css change. -->
-  <link rel="stylesheet" href="/static/style.css?v=16" />
+  <link rel="stylesheet" href="/static/style.css?v=17" />
 </head>
 <body>
+  <!--
+    Guest-mode banner. Deliberately outside <main> and directly under the
+    header so it can't be scrolled past on the way to the library, and shown
+    for the whole guest session rather than once — the point is that it's
+    still visible at the moment somebody decides to save a tenth book.
+  -->
+  <div id="guest-banner" class="hidden" role="status">
+    <span class="guest-banner-text">
+      <strong>Guest mode.</strong>
+      Nothing here is saved to an account — your books stay on this browser
+      for 30 days.
+    </span>
+    <button type="button" id="guest-upgrade-btn">Sign up to keep them</button>
+  </div>
+
   <header>
     <div id="auth-bar">
       <span id="auth-status"></span>
@@ -91,7 +106,8 @@
       <div class="help-quickstart">
         <strong>Quick start</strong>
         <ol>
-          <li>Create an account with <em>Log in → Sign up</em> (top right).</li>
+          <li>Create an account with <em>Log in → Sign up</em> (top right), or pick
+            <em>Or try it without an account</em> to look around as a guest first.</li>
           <li>Search for a few books you love and click <em>Save to Library</em>.</li>
           <li>Open <em>My Library</em> and hit <em>Get Recommendations Based on My Library</em>.</li>
         </ol>
@@ -104,9 +120,19 @@
             Usernames are 2–32 characters, passwords at least 6.</li>
           <li>Your library follows your account, so it's the same on your phone and
             your laptop. You stay signed in on a device until you log out.</li>
-          <li>You can search and use <em>Find Similar</em> without an account — but
-            saving, rating, sections and recommendations need one. If you click
-            <em>Save to Library</em> while signed out, the login box opens for you.</li>
+          <li>You can search and use <em>Find Similar</em> without signing in at all.
+            If you click <em>Save to Library</em> while signed out, the login box
+            opens for you.</li>
+          <li><strong>Guest mode</strong> lets you try everything — saving, rating,
+            sections, recommendations — before making an account. Pick
+            <em>Or try it without an account</em> in the login box or on the
+            <em>My Library</em> tab. A guest library lives on that one browser, is
+            deleted after 30 days, and has no password, so there's no way to sign
+            back in to it. A banner stays on screen while you're a guest to say so.</li>
+          <li><strong>Signing up as a guest keeps everything you've collected</strong> —
+            your books, sections and ratings move to the new account. Logging in to an
+            account you <em>already</em> have does not; that leaves the guest library
+            behind.</li>
           <li>Once you're signed in, the app opens straight into <strong>My Library</strong>.</li>
           <li>Forgot your username or password? Email us from the login box and we'll
             sort it out.</li>
@@ -245,12 +271,19 @@
       <form id="auth-form">
         <input type="text" id="auth-username" placeholder="Username" autocomplete="username" />
         <input type="password" id="auth-password" placeholder="Password" autocomplete="current-password" />
+        <div id="guest-login-warning" class="auth-warning hidden">
+          Logging in to an existing account will leave your guest library
+          behind. To keep it, sign up for a new account instead.
+        </div>
         <div id="auth-error" class="auth-error hidden"></div>
         <button type="submit" id="auth-submit">Log in</button>
       </form>
       <p class="auth-toggle">
         <span id="auth-toggle-text">Don't have an account?</span>
         <button type="button" id="auth-toggle-btn">Sign up</button>
+      </p>
+      <p class="auth-guest">
+        <button type="button" id="auth-guest-btn">Or try it without an account</button>
       </p>
       <p class="auth-forgot">
         Forgot your username or password?
@@ -262,6 +295,32 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=16"></script>
+  <!--
+    Shown once, the first time somebody enters guest mode. The banner above is
+    the standing reminder; this is the up-front disclosure, so it says the part
+    that's easy to get wrong — signing up later keeps everything.
+  -->
+  <div id="guest-modal" class="hidden">
+    <div class="auth-card">
+      <button type="button" id="guest-modal-close" class="auth-close" aria-label="Close">&times;</button>
+      <h2>You're browsing as a guest</h2>
+      <p class="guest-modal-lead">
+        Everything works — save books, build sections, mark what you're reading,
+        and get recommendations. A few things to know:
+      </p>
+      <ul class="guest-modal-list">
+        <li>Your library lives on <strong>this browser only</strong>. Another device won't see it.</li>
+        <li>It's deleted after <strong>30 days</strong>, and clearing your cookies loses it immediately.</li>
+        <li>There's no password, so there's no way to sign back in to a guest library.</li>
+        <li><strong>Sign up any time and everything you've collected comes with you.</strong></li>
+      </ul>
+      <button type="button" id="guest-modal-ok" class="recommend-btn">Got it — start browsing</button>
+      <p class="auth-toggle">
+        <button type="button" id="guest-modal-signup">Actually, let me sign up first</button>
+      </p>
+    </div>
+  </div>
+
+  <script src="/static/app.js?v=17"></script>
 </body>
 </html>
