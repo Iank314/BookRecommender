@@ -59,7 +59,12 @@ from server.storage.activity_db import ActivityStore
 from server.storage.seo_db import SeoPageStore
 from server.storage.feedback_db import FeedbackKind, FeedbackStore
 from server.storage.library_db import LibraryStore, SectionNameTakenError
-from server.storage.users_db import UserStore, UsernameTakenError
+from server.storage.users_db import (
+    GUEST_MAX_AGE_SECONDS,
+    GUEST_USERNAME_PREFIX,
+    UserStore,
+    UsernameTakenError,
+)
 
 
 def _env_flag(name: str) -> bool:
@@ -90,6 +95,20 @@ COOKIE_MAX_AGE = 60 * 60 * 24 * 365  # 1 year
 # keeps working; auto-detection isn't reliable behind reverse proxies that
 # terminate TLS at the edge.
 SESSION_COOKIE_SECURE = _env_flag("BOOKREC_SECURE_COOKIES")
+# Whether X-Forwarded-For can be believed. It is a client-supplied header like
+# any other: it only carries information when something we control appends to
+# it. Behind Caddy (docker-compose.prod.yml sets this true) the last hop is the
+# peer Caddy saw and is trustworthy; exposed directly, the whole header is
+# attacker-written, so trusting it would hand out an unlimited supply of fresh
+# rate-limit buckets. Off by default so the insecure case is the one you have
+# to opt into, not the one you get by forgetting.
+TRUST_PROXY_HEADERS = _env_flag("BOOKREC_TRUSTED_PROXY")
+
+# A guest's cookie is pinned to the server-side guest lifetime rather than the
+# year a real session gets. Otherwise the browser would keep presenting a token
+# whose account the pruner has already deleted, and guest mode would look like
+# a random logout instead of an expiry.
+GUEST_COOKIE_MAX_AGE = GUEST_MAX_AGE_SECONDS
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 logger = logging.getLogger(__name__)
@@ -99,6 +118,20 @@ if _ENV_FROM_FILE:
     # without adding a print, and the answer decides whether a local run has
     # Google Books at all.
     logger.info("Loaded from .env: %s", ", ".join(sorted(_ENV_FROM_FILE)))
+# Worth one line at startup because the failure it explains is baffling from
+# the outside: with no trusted proxy, every request behind Caddy shares one
+# rate-limit bucket, so guest creation starts 429ing site-wide for reasons no
+# single user's behaviour accounts for.
+#
+# Sent to uvicorn's own logger rather than this module's. Uvicorn configures
+# `uvicorn.error` and leaves the root logger alone, so a plain logger.info()
+# here is written to nowhere in the one environment that matters — which is
+# also why the `.env` line above has never appeared in a production log.
+logging.getLogger("uvicorn.error").info(
+    "Proxy headers (X-Forwarded-For) are %s.",
+    "trusted" if TRUST_PROXY_HEADERS else
+    "NOT trusted — rate limits key on the socket peer",
+)
 # Upper bounds exist because /search and /similar take no authentication and
 # their text drives tokenisation and scoring — without a ceiling, body size is
 # free CPU for anyone who asks. The limits are far above any real input: the
@@ -1959,6 +1992,37 @@ activity_store = ActivityStore()
 seo_store = SeoPageStore()
 rec_cache = RecommendationCache()
 login_throttle = LoginThrottle()
+# Guest creation is unauthenticated and writes a row, so it needs a ceiling of
+# its own. Looser than the login throttle because tripping it blocks a first-
+# time visitor rather than a password guesser: a shared office NAT should never
+# hit 10 new guests in ten minutes, and nothing is lost if it does — the
+# existing cookie still works, and signing up is still one click away.
+guest_throttle = LoginThrottle(max_attempts=10, window_seconds=600.0)
+
+
+def _throttle_key(request: Request) -> str:
+    """Client identity for the guest throttle.
+
+    Only consults X-Forwarded-For when BOOKREC_TRUSTED_PROXY says a proxy we
+    control is in front; otherwise the header is attacker-written and using it
+    is strictly worse than the socket peer.
+
+    When it is consulted, the *last* hop is the one to read, not the
+    conventional first. Caddy appends the peer it saw to whatever the client
+    already sent, so earlier entries are the client's own invention and only
+    the final one was written by us — reading hops[0] would let an attacker
+    rotate the key freely and defeat the cap entirely.
+
+    Falls back to the socket peer, and to one shared bucket if even that is
+    missing, which degrades to a global cap rather than to no limit at all.
+    """
+    if TRUST_PROXY_HEADERS:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            hops = [h.strip() for h in forwarded.split(",") if h.strip()]
+            if hops:
+                return hops[-1]
+    return request.client.host if request.client else "unknown"
 
 
 def _soft_user_id(session_token: str | None) -> str | None:
@@ -2110,11 +2174,13 @@ def _record_visit(request: Request, session_token: str | None) -> None:
         logger.warning("Failed to record a page view.", exc_info=True)
 
 
-def _set_session_cookie(response: Response, token: str) -> None:
+def _set_session_cookie(
+    response: Response, token: str, max_age: int = COOKIE_MAX_AGE
+) -> None:
     response.set_cookie(
         key=SESSION_COOKIE,
         value=token,
-        max_age=COOKIE_MAX_AGE,
+        max_age=max_age,
         httponly=True,
         secure=SESSION_COOKIE_SECURE,
         samesite="lax",
@@ -2136,7 +2202,14 @@ def _clear_session_cookie(response: Response) -> None:
 def get_current_user_id(
     bookrec_session: str | None = Cookie(default=None),
 ) -> str:
-    """Resolve the logged-in user from the session cookie, or 401."""
+    """Resolve the current user from the session cookie, or 401.
+
+    Guests resolve here exactly like signed-up accounts — that is the design:
+    a guest is a real users row, so every library/section/feedback endpoint
+    works for one without a second code path to keep in sync. What separates
+    them is lifetime (scripts/prune_guests.py) and the fact that nobody can
+    log back into a guest, not what they're allowed to do.
+    """
     if bookrec_session:
         user_id = user_store.user_for_session(bookrec_session)
         if user_id:
@@ -2161,21 +2234,111 @@ class AuthRequest(BaseModel):
 class AuthResponse(BaseModel):
     username: str
     is_admin: bool = False
+    # True only while browsing as a guest. The frontend hangs its "nothing here
+    # is being saved to an account" banner off this, so it has to come back
+    # from /auth/me too, not just from the call that created the guest.
+    is_guest: bool = False
 
 
-@app.post("/auth/register", response_model=AuthResponse, summary="Create an account")
-def auth_register(req: AuthRequest, response: Response):
-    if not username_is_clean(req.username):
+def _reject_bad_username(username: str) -> None:
+    """422 on a username nobody should be allowed to take."""
+    if username.lower().startswith(GUEST_USERNAME_PREFIX):
+        # Guest names are generated, so a person asking for one is either
+        # confused or trying to make their account read as somebody else's
+        # throwaway. Refused before the uniqueness check so the answer doesn't
+        # depend on whether that particular guest happens to exist.
+        raise HTTPException(
+            status_code=422,
+            detail=f"Usernames can't start with \"{GUEST_USERNAME_PREFIX}\".",
+        )
+    if not username_is_clean(username):
         raise HTTPException(
             status_code=422,
             detail="That username isn't allowed. Please pick a different one.",
         )
+
+
+@app.post("/auth/register", response_model=AuthResponse, summary="Create an account")
+def auth_register(
+    req: AuthRequest,
+    response: Response,
+    bookrec_session: str | None = Cookie(default=None),
+):
+    """Create an account — or, when the caller is browsing as a guest, promote
+    that guest in place so everything it collected carries over.
+
+    The promotion is why guest mode is worth having: you try the app, you like
+    it, you sign up, and your shelf is still there. It works because the guest
+    already owns a user_id and every library row is keyed by it, so nothing is
+    copied and nothing can be half-copied.
+    """
+    _reject_bad_username(req.username)
+
+    guest_id = user_store.user_for_session(bookrec_session) if bookrec_session else None
+    if guest_id and user_store.is_guest(guest_id):
+        try:
+            converted = user_store.convert_guest(guest_id, req.username, req.password)
+        except UsernameTakenError:
+            raise HTTPException(status_code=409, detail="Username already taken.")
+        if converted:
+            # Same session token, now pointing at a real account — so the
+            # promotion doesn't sign anyone out mid-flow. The cookie is
+            # re-issued only to stretch it from the guest expiry to the full
+            # year the account has earned.
+            _set_session_cookie(response, bookrec_session)
+            return AuthResponse(username=req.username)
+        # Lost the race with the pruner, or converted in another tab. Fall
+        # through and make a fresh account rather than 500 on a signup.
+
     try:
         user_id = user_store.create_user(req.username, req.password)
     except UsernameTakenError:
         raise HTTPException(status_code=409, detail="Username already taken.")
     _set_session_cookie(response, user_store.create_session(user_id))
     return AuthResponse(username=req.username)
+
+
+@app.post("/auth/guest", response_model=AuthResponse,
+          summary="Browse as a guest, without an account")
+def auth_guest(
+    request: Request,
+    response: Response,
+    bookrec_session: str | None = Cookie(default=None),
+):
+    """Hand out a throwaway account so the saved-library features can be tried
+    without signing up. Nothing about it is durable: it holds no credentials,
+    can't be logged back into, and is deleted with its books after
+    GUEST_MAX_AGE_SECONDS.
+    """
+    # Already holding a session — hand back what they have rather than
+    # stranding a guest library behind a fresh id. Also makes the endpoint
+    # idempotent, so a double-click can't mint two guests.
+    if bookrec_session:
+        existing = user_store.user_for_session(bookrec_session)
+        if existing:
+            username = user_store.get_username(existing)
+            if username:
+                return AuthResponse(
+                    username=username,
+                    is_admin=user_store.is_admin(existing),
+                    is_guest=user_store.is_guest(existing),
+                )
+
+    # This is the one unauthenticated endpoint that writes a permanent row, so
+    # it gets a ceiling. Best-effort by nature — see _throttle_key.
+    key = _throttle_key(request)
+    if not guest_throttle.is_allowed(key):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many guest sessions from here. Try again in a few minutes.",
+        )
+    guest_throttle.record_failure(key)
+
+    user_id, username = user_store.create_guest()
+    _set_session_cookie(
+        response, user_store.create_session(user_id), max_age=GUEST_COOKIE_MAX_AGE
+    )
+    return AuthResponse(username=username, is_guest=True)
 
 
 @app.post("/auth/login", response_model=AuthResponse, summary="Log in")
@@ -2191,6 +2354,8 @@ def auth_login(req: AuthRequest, response: Response):
         raise HTTPException(status_code=401, detail="Invalid username or password.")
     login_throttle.clear(req.username)
     _set_session_cookie(response, user_store.create_session(user_id))
+    # is_guest is left False: verify_credentials can't resolve a guest row, so
+    # a successful login is a real account by construction.
     return AuthResponse(
         username=user_store.get_username(user_id) or req.username,
         is_admin=user_store.is_admin(user_id),
@@ -2213,7 +2378,11 @@ def auth_me(user_id: str = Depends(get_current_user_id)):
     username = user_store.get_username(user_id)
     if not username:
         raise HTTPException(status_code=401, detail="Not logged in.")
-    return AuthResponse(username=username, is_admin=user_store.is_admin(user_id))
+    return AuthResponse(
+        username=username,
+        is_admin=user_store.is_admin(user_id),
+        is_guest=user_store.is_guest(user_id),
+    )
 
 
 # ------------------------------------------------------------------ #
@@ -2259,6 +2428,7 @@ def admin_stats(user_id: str = Depends(get_admin_user_id)):
         accounts.append({
             "username": a["username"],
             "is_admin": a["is_admin"],
+            "is_guest": a["is_guest"],
             "created_at": a["created_at"],
             "books_saved": len(library_store.all(a["user_id"])),
             "last_active": last_seen.get(a["user_id"]),
@@ -2266,7 +2436,12 @@ def admin_stats(user_id: str = Depends(get_admin_user_id)):
 
     return {
         "now": now,
-        "accounts_total": len(accounts),
+        # accounts_total counts signed-up accounts only. Guests are reported
+        # separately because mixing them in would make the one number anyone
+        # actually watches — "how many people have signed up?" — drift upward
+        # every time a stranger clicks "try it without an account".
+        "accounts_total": sum(1 for a in accounts if not a["is_guest"]),
+        "guests_total": sum(1 for a in accounts if a["is_guest"]),
         "accounts": accounts,
         # Events by kind: search (page 1 only), similar, recommend, plus
         # visit/crawl for HTML page requests.
@@ -2305,6 +2480,12 @@ def admin_stats(user_id: str = Depends(get_admin_user_id)):
         },
         # Process memory in MiB (Linux prod only; empty on Windows dev).
         "memory": _process_memory(),
+        # Whether X-Forwarded-For is believed. False behind Caddy means every
+        # visitor shares one rate-limit bucket — the symptom is guest creation
+        # 429ing for everyone at once, which nothing in the traffic explains.
+        # Here rather than only in a log because this panel is already where
+        # "is production actually configured the way I think?" gets answered.
+        "trusts_proxy_headers": TRUST_PROXY_HEADERS,
         # Is Google Books actually answering? It degrades to an empty result
         # set rather than an error, so "results got worse" and "one provider
         # stopped replying" look identical from the outside. `key_configured`
@@ -4135,6 +4316,21 @@ def _to_out(b, relevance: float | None = None) -> dict:
 # HEAD is what uptime monitors (UptimeRobot et al.) send by default — without
 # it the homepage answers 405 and monitoring reports the site "down" while
 # browsers (GET) work fine. FileResponse handles HEAD natively (headers only).
+INDEX_HTML = FRONTEND_DIR / "index.html"
+
+
+def _matches_etag(if_none_match: str | None, etag: str | None) -> bool:
+    """Does a client's If-None-Match cover `etag`?
+
+    Handles the list form ("a", "b") and the weak-validator prefix, which a
+    proxy may add on its way through; `*` matches anything the client has.
+    """
+    if not if_none_match or not etag:
+        return False
+    candidates = {t.strip().removeprefix("W/") for t in if_none_match.split(",")}
+    return "*" in candidates or etag.removeprefix("W/") in candidates
+
+
 @app.get("/", include_in_schema=False)
 @app.head("/", include_in_schema=False)
 def serve_frontend(
@@ -4142,7 +4338,42 @@ def serve_frontend(
     bookrec_session: str | None = Cookie(default=None),
 ):
     _record_visit(request, bookrec_session)
-    return FileResponse(FRONTEND_DIR / "index.html")
+    # `no-cache` means "store it, but revalidate every time" — not "don't
+    # store it". Without a Cache-Control header at all, a browser applies
+    # heuristic freshness and may serve this shell from cache for hours, which
+    # breaks the deploy story: the ?v=N query strings on app.js and style.css
+    # only bust a cache once the HTML naming them is itself fresh, so a stale
+    # shell pins a returning visitor to the whole old frontend.
+    #
+    # Passing stat_result makes FileResponse fill in etag/last-modified now
+    # rather than during the response, which is what lets the conditional
+    # check below see them.
+    try:
+        stat_result = os.stat(INDEX_HTML)
+    except OSError:
+        # Missing or unreadable index.html is a broken deploy, not something to
+        # paper over — let FileResponse raise the same error it always would.
+        return FileResponse(INDEX_HTML, headers={"Cache-Control": "no-cache"})
+
+    response = FileResponse(
+        INDEX_HTML,
+        stat_result=stat_result,
+        headers={"Cache-Control": "no-cache"},
+    )
+    # Revalidate-every-time is only cheap if revalidating is cheap. Starlette
+    # puts conditional-request handling in StaticFiles, not in FileResponse, so
+    # a plain FileResponse re-sends the whole file on every load however good
+    # the client's cached copy is — this route has to answer 304 itself or
+    # `no-cache` just means "download the shell again, always".
+    if _matches_etag(request.headers.get("if-none-match"), response.headers.get("etag")):
+        return Response(status_code=304, headers={
+            k: v for k, v in response.headers.items()
+            # A 304 carries the validators and caching rules, never the body's
+            # own headers — content-length especially, which would promise
+            # bytes that aren't coming.
+            if k.lower() in ("etag", "last-modified", "cache-control")
+        })
+    return response
 
 
 # ------------------------------------------------------------------ #

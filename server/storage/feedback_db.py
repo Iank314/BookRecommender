@@ -78,6 +78,15 @@ class FeedbackStore(SQLiteStore):
             )
             return cur.rowcount > 0
 
+    def delete_all_for_user(self, user_id: str) -> int:
+        """Erase every opinion a user has recorded. Guest-pruner only — see
+        LibraryStore.delete_all_for_user."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM feedback_entries WHERE user_id = ?", (user_id,)
+            )
+            return cur.rowcount
+
     def kind_for(self, user_id: str, book_id: str) -> FeedbackKind | None:
         with self._connect() as conn:
             row = conn.execute(

@@ -20,6 +20,26 @@ _PBKDF2_ROUNDS = 200_000
 # together — a session the browser has already dropped is dead weight anyway.
 SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 365
 
+# Guest accounts. A guest is a real users row with no credentials, created so
+# somebody can try the library, sections and recommendations without signing
+# up. Two things keep that from being a back door into the account system:
+# every guest username starts with GUEST_USERNAME_PREFIX (which registration
+# refuses, so nobody can mint a lookalike), and the password hash is stored as
+# a value _verify_password can never match, so `guest-1a2b` is not an account
+# anyone can log into even knowing the name.
+GUEST_USERNAME_PREFIX = "guest-"
+
+# How long a guest's data survives. Shorter than a session by design: this is
+# scratch data for someone who hasn't committed to an account, and it costs
+# real rows in library.db until scripts/prune_guests.py sweeps it. Long enough
+# that closing the laptop for a fortnight doesn't lose your shelf.
+GUEST_MAX_AGE_SECONDS = 60 * 60 * 24 * 30
+
+# A password hash no password can produce. _hash_password always emits
+# "<salt>$<hexdigest>", so a value with no "$" makes _verify_password's split
+# raise and return False for every input — including this literal itself.
+_UNUSABLE_PASSWORD = "!guest-no-login"
+
 
 class UsernameTakenError(Exception):
     """Raised when registering a username that already exists."""
@@ -61,11 +81,22 @@ class UserStore(SQLiteStore):
     """
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
-        # Migration for DBs created before the admin flag existed.
+        # Migrations for DBs created before the admin and guest flags existed.
         cols = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
         if "is_admin" not in cols:
             conn.execute(
                 "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
+            )
+        if "is_guest" not in cols:
+            # Defaulting to 0 is the safe direction: every pre-existing row is
+            # a real signed-up account, and the guest pruner only ever deletes
+            # rows with this set.
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN is_guest INTEGER NOT NULL DEFAULT 0"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_users_guest_created "
+                "ON users(is_guest, created_at)"
             )
 
     def create_user(self, username: str, password: str) -> str:
@@ -86,8 +117,11 @@ class UserStore(SQLiteStore):
         """Return the user_id if username/password match, else None."""
         with self._connect() as conn:
             row = conn.execute(
+                # is_guest = 0 as well as the unusable hash: two independent
+                # reasons a guest row can't be logged into, so neither one
+                # being wrong on its own opens the door.
                 "SELECT user_id, password_hash FROM users "
-                "WHERE username = ? COLLATE NOCASE",
+                "WHERE username = ? COLLATE NOCASE AND is_guest = 0",
                 (username,),
             ).fetchone()
         if row and _verify_password(password, row["password_hash"]):
@@ -144,15 +178,98 @@ class UserStore(SQLiteStore):
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT user_id, username, created_at, is_admin
+                SELECT user_id, username, created_at, is_admin, is_guest
                 FROM users ORDER BY created_at DESC
                 """
             ).fetchall()
         return [
             {"user_id": r["user_id"], "username": r["username"],
-             "created_at": r["created_at"], "is_admin": bool(r["is_admin"])}
+             "created_at": r["created_at"], "is_admin": bool(r["is_admin"]),
+             "is_guest": bool(r["is_guest"])}
             for r in rows
         ]
+
+    # ------------------------------------------------------------------ #
+    # Guests — credential-less accounts for trying the app before signing up.
+    # ------------------------------------------------------------------ #
+    def create_guest(self) -> tuple[str, str]:
+        """Create a guest account and return its (user_id, username).
+
+        The username is generated rather than chosen so it can't collide with
+        anything a person would pick, and it carries GUEST_USERNAME_PREFIX so
+        every later read can tell what it is without a join.
+        """
+        for _ in range(5):
+            user_id = secrets.token_hex(16)
+            username = f"{GUEST_USERNAME_PREFIX}{secrets.token_hex(4)}"
+            try:
+                with self._connect() as conn:
+                    conn.execute(
+                        "INSERT INTO users "
+                        "(user_id, username, password_hash, is_guest) "
+                        "VALUES (?, ?, ?, 1)",
+                        (user_id, username, _UNUSABLE_PASSWORD),
+                    )
+            except sqlite3.IntegrityError:
+                # 4 random bytes collide at a rate worth retrying for and not
+                # worth widening the name for; the loop is the cheap fix.
+                continue
+            return user_id, username
+        raise RuntimeError("Could not allocate a unique guest username.")
+
+    def is_guest(self, user_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT is_guest FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+        return bool(row and row["is_guest"])
+
+    def convert_guest(self, user_id: str, username: str, password: str) -> bool:
+        """Turn a guest into a real account in place, keeping its user_id.
+
+        Keeping the id is the whole point: every library entry, section and
+        feedback row is keyed by user_id, so signing up carries across what the
+        guest collected without copying a single row. Returns False if
+        `user_id` isn't a guest (already converted, or pruned out from under
+        the session); raises UsernameTakenError if the name is spoken for.
+        """
+        try:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "UPDATE users SET username = ?, password_hash = ?, "
+                    "is_guest = 0, created_at = strftime('%s', 'now') "
+                    "WHERE user_id = ? AND is_guest = 1",
+                    (username, _hash_password(password), user_id),
+                )
+                return cur.rowcount > 0
+        except sqlite3.IntegrityError as exc:
+            raise UsernameTakenError(username) from exc
+
+    def stale_guest_ids(self, now: int | None = None) -> list[str]:
+        """Guest user_ids past GUEST_MAX_AGE_SECONDS — what prune_guests sweeps.
+
+        Returned rather than deleted in one step because a guest's books,
+        sections and feedback live in other stores' tables; the caller clears
+        those first, then calls delete_user. `created_at` is reset on
+        conversion, so a guest who signs up on day 29 starts its account life
+        fresh and is never in this list.
+        """
+        cutoff = (now if now is not None else int(time.time())) - GUEST_MAX_AGE_SECONDS
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT user_id FROM users "
+                "WHERE is_guest = 1 AND created_at < ?",
+                (cutoff,),
+            ).fetchall()
+        return [r["user_id"] for r in rows]
+
+    def delete_user(self, user_id: str) -> bool:
+        """Delete an account and its sessions. Guest cleanup only — there is
+        deliberately no web path to this, and no caller for a real account."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+            cur = conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+            return cur.rowcount > 0
 
     def create_session(self, user_id: str) -> str:
         token = secrets.token_urlsafe(32)

@@ -153,6 +153,22 @@ class LibraryStore(SQLiteStore):
     # ------------------------------------------------------------------ #
     # Sections — user-defined shelves, many-to-many with library books
     # ------------------------------------------------------------------ #
+    def delete_all_for_user(self, user_id: str) -> int:
+        """Erase a user's whole library — entries, sections, memberships.
+
+        Only the guest pruner calls this (scripts/prune_guests.py); a signed-up
+        account has no path to it. Returns the number of book entries removed,
+        which is the count worth reporting — sections of a deleted library are
+        noise.
+        """
+        with self._connect() as conn:
+            conn.execute("DELETE FROM section_books WHERE user_id = ?", (user_id,))
+            conn.execute("DELETE FROM library_sections WHERE user_id = ?", (user_id,))
+            cur = conn.execute(
+                "DELETE FROM library_entries WHERE user_id = ?", (user_id,)
+            )
+            return cur.rowcount
+
     def create_section(self, user_id: str, name: str) -> dict:
         """Create a section; returns {"id", "name", "book_ids"}.
 
